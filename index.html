@@ -4,23 +4,28 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LUMOS 단어장</title>
+  <meta name="theme-color" content="#ffffff">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
   <script src="lib/html2pdf.bundle.min.js"></script>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand" data-go="home">
-      <span class="logo">LUMOS</span>
-      <span class="brand-sub">English Academy · 단어장</span>
+    <div class="topbar-inner">
+      <a class="brand" data-go="home">
+        <span class="brand-mark">L</span>
+        <span class="brand-name">LUMOS</span>
+        <span class="brand-sub">단어장</span>
+      </a>
+      <nav class="tabs" aria-label="메뉴">
+        <button data-go="home" class="tab">단어장</button>
+        <button data-go="test" class="tab">시험지 만들기</button>
+        <button data-go="backup" class="tab">백업</button>
+      </nav>
     </div>
-    <nav class="tabs">
-      <button data-go="home" class="tab">단어장 목록</button>
-      <button data-go="test" class="tab">시험지 만들기</button>
-      <button data-go="backup" class="tab">백업</button>
-    </nav>
   </header>
 
   <div class="layout">
@@ -28,8 +33,9 @@
     <main id="main"></main>
   </div>
 
+  <div id="modal-root"></div>
   <div id="pdf-stage" aria-hidden="true"></div>
-  <div id="toast"></div>
+  <div id="toast" role="status"></div>
 
   <script src="app.js"></script>
 </body>
