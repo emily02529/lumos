@@ -427,14 +427,14 @@ function renderResult() {
       <div class="big">${good}<small> / ${total}</small></div>
       <div class="msg">${msg}</div>
       <div class="sub">${isQuiz ? `맞힌 문제 ${good}개 · 틀린 문제 ${bad.length}개` : `알아요 ${good}개 · 몰라요 ${bad.length}개`}</div>
-      ${bad.length ? `<div class="note-saved">${ic('check')}${isQuiz ? '틀린' : '몰라요'} 단어 ${bad.length}개를 오답 노트에 담았어요</div>` : S.review ? `<div class="note-saved">${ic('check')}복습한 단어를 오답 노트에서 뺐어요</div>` : ''}
+      ${bad.length ? `<div class="note-saved">${ic('check')}${isQuiz ? '틀린 단어' : '모르는 단어'} ${bad.length}개를 오답 노트에 담았어요</div>` : S.review ? `<div class="note-saved">${ic('check')}복습한 단어를 오답 노트에서 뺐어요</div>` : ''}
       <div class="result-actions">
-        ${bad.length ? `<button class="btn primary xl" id="rBad">${isQuiz ? '틀린 것만 다시 풀기' : '몰라요만 다시 보기'} (${bad.length})</button>` : ''}
+        ${bad.length ? `<button class="btn primary xl" id="rBad">${isQuiz ? '틀린 것만 다시 풀기' : '모르는 단어만 다시 보기'} (${bad.length})</button>` : ''}
         <button class="btn ${bad.length ? '' : 'primary'} xl" id="rAgain">처음부터 다시</button>
         <button class="btn ghost" id="rSetup">${S.review ? '처음 화면으로' : '범위 다시 고르기'}</button>
       </div>
     </div>
-    ${bad.length ? `<div class="card wrong-list"><div class="card-title">${isQuiz ? '틀린 단어' : '몰라요 단어'}</div>
+    ${bad.length ? `<div class="card wrong-list"><div class="card-title">${isQuiz ? '틀린 단어' : '모르는 단어'}</div>
       ${bad.map(r => `<div class="wrong-row"><b>${esc(r.en)}</b><span>${esc(r.ko)}${isQuiz ? `<em>내가 고른 답: ${esc(r.picked)}</em>` : ''}</span></div>`).join('')}
     </div>` : ''}`;
   const again = list => start(list.map(({ ok, picked, ask, ...w }) => w), { review: S.review });
