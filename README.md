@@ -24,6 +24,7 @@ https://lumos.naru.pub 에서 쓰며, 단어장은 Firebase(무료)에 저장되
   - 시험지 PDF와 답안지 PDF (A4 세로)
 - 학원 공용 계정(이메일/비밀번호)으로 로그인해서 사용
 - 백업 탭에서 `.json`으로 내보내기/불러오기
+- **학생용 공부 페이지** (`study.html`, 로그인 없음): 교재·단원·문제 범위를 골라 플래시카드 또는 객관식으로 공부
 
 ## 저장소 (Firebase, 무료 Spark 플랜)
 
@@ -32,6 +33,7 @@ https://lumos.naru.pub 에서 쓰며, 단어장은 Firebase(무료)에 저장되
 
 처음 한 번 설정:
 1. Firebase 콘솔 → Firestore Database → **규칙** 탭에 `firestore.rules` 내용을 붙여넣고 게시
+   (읽기는 누구나 — 학생용 페이지용, 쓰기는 로그인한 사용자만)
 2. Authentication → 로그인 방법: **이메일/비밀번호** 사용 설정
 3. Authentication → 사용자: 학원 공용 계정 추가
 4. Authentication → 설정 → 사용자 작업: **가입(계정 생성) 사용 설정 해제**
@@ -40,6 +42,8 @@ https://lumos.naru.pub 에서 쓰며, 단어장은 Firebase(무료)에 저장되
 ## 파일
 
 - `index.html`, `style.css`, `app.js`: 앱
+- `study.html`, `study.js`, `study.css`: 학생용 공부 페이지
+- `test-maker.css`: 문제 고르기 스타일
 - `spell.js`: 철자 검사·자동완성 (사전 데이터는 jsDelivr에서 불러옴)
 - `firestore.rules`: Firestore 보안 규칙 (로그인한 사용자만 읽기/쓰기)
 - `lib/html2pdf.bundle.min.js`: PDF 생성 라이브러리 ([html2pdf.js](https://github.com/eKoopmans/html2pdf.js) 0.10.1, MIT)
