@@ -24,7 +24,7 @@ https://lumos.naru.pub 에서 쓰며, 단어장은 Firebase(무료)에 저장되
   - 시험지 PDF와 답안지 PDF (A4 세로)
 - 학원 공용 계정(이메일/비밀번호)으로 로그인해서 사용
 - 백업 탭에서 `.json`으로 내보내기/불러오기
-- **학생용 공부 페이지** (`study.html`, 로그인 없음): 교재·단원·문제 범위를 골라 플래시카드 또는 객관식으로 공부
+- **첫 화면 = 학생용 공부 페이지** (`index.html`, 로그인 없음): 교재·단원·문제 범위를 골라 플래시카드 또는 객관식으로 공부
 
 ## 저장소 (Firebase, 무료 Spark 플랜)
 
@@ -41,8 +41,9 @@ https://lumos.naru.pub 에서 쓰며, 단어장은 Firebase(무료)에 저장되
 
 ## 파일
 
-- `index.html`, `style.css`, `app.js`: 앱
-- `study.html`, `study.js`, `study.css`: 학생용 공부 페이지
+- `admin.html`, `style.css`, `app.js`: 선생님용 자료 관리 (오른쪽 위 `자료 관리` 링크, 로그인 필요)
+- `index.html`, `study.js`, `study.css`: 학생용 공부 페이지 (첫 화면)
+- `study.html`: 예전 주소 → 첫 화면으로 이동
 - `test-maker.css`: 문제 고르기 스타일
 - `spell.js`: 철자 검사·자동완성 (사전 데이터는 jsDelivr에서 불러옴)
 - `firestore.rules`: Firestore 보안 규칙 (로그인한 사용자만 읽기/쓰기)

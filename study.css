@@ -5,6 +5,13 @@
 .study-main > * { animation: rise .35s var(--ease) both; }
 @media (max-width: 560px) { .study-main { padding: 20px 16px 72px; } }
 
+/* 선생님용 자료 관리 링크 (오른쪽 위, 눈에 덜 띄게) */
+.admin-link {
+  margin-left: auto; font-size: 13.5px; font-weight: 600; color: var(--text-3);
+  text-decoration: none; padding: 6px 10px; border-radius: 8px;
+}
+.admin-link:hover { color: var(--text); background: var(--fill); }
+
 /* 공부 방법 카드 */
 .smodes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .smode {
