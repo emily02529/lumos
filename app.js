@@ -555,6 +555,80 @@ function analyze(qs, bank, typing = null) {
   return { dupInList, dupIn: new Set(dupInList.map(d => d.k)), dupOut, dupOutKeys: new Set(dupOut.map(d => d.k)), typos };
 }
 
+/* 단어마다 입력칸 속 위치(span)까지 기억하는 파서 — 중복 정리에 씀 */
+function parseSpans(text) {
+  const qs = [];
+  let cur = null, en = [], ko = [];
+  const kind = t => (/^\d{1,3}[.)]?$/.test(t) ? 'num' : /[ㄱ-ㆎ가-힣]/.test(t) ? 'ko' : /[A-Za-z]/.test(t) ? 'en' : 'sym');
+  const flush = () => {
+    if (en.length || ko.length) {
+      if (!cur) { cur = { num: null, words: [] }; qs.push(cur); }
+      const all = [...en, ...ko];
+      cur.words.push({
+        en: en.map(t => t.s).join(' '), ko: ko.map(t => t.s).join(' '),
+        start: all[0].i, end: all[all.length - 1].i + all[all.length - 1].s.length,
+        koStart: ko.length ? ko[0].i : null, koEnd: ko.length ? ko[ko.length - 1].i + ko[ko.length - 1].s.length : null,
+        q: cur,
+      });
+    }
+    en = []; ko = [];
+  };
+  for (const m of text.matchAll(/\S+/g)) {
+    const t = { s: m[0], i: m.index };
+    const k = kind(t.s);
+    if (k === 'num') { flush(); cur = { num: { start: t.i, end: t.i + t.s.length }, words: [] }; qs.push(cur); }
+    else if (k === 'en') { if (ko.length) flush(); en.push(t); }
+    else if (k === 'ko' || en.length || ko.length) ko.push(t);
+  }
+  flush();
+  return qs;
+}
+
+/* 같은 영어 단어가 여러 번 있으면 첫 번째만 남김. 뜻이 다르면 뜻을 합침.
+ * onlyKey를 주면 그 단어만, 안 주면 모든 중복을 정리 */
+function dedupeRaw(text, onlyKey = null) {
+  const qs = parseSpans(text);
+  const groups = new Map();
+  for (const q of qs) for (const w of q.words) {
+    if (!w.en) continue;
+    const k = normEn(w.en);
+    if (onlyKey && k !== onlyKey) continue;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(w);
+  }
+  const edits = [];
+  const removed = new Set();
+  const merged = [];
+  let count = 0;
+  for (const [, ws] of groups) {
+    if (ws.length < 2) continue;
+    const keep = ws.find(w => w.ko) || ws[0];
+    const meanings = [];
+    for (const w of [keep, ...ws.filter(x => x !== keep)]) {
+      for (const m of String(w.ko).split(/\s*[,;/]\s*/)) if (m && !meanings.some(x => normKo(x) === normKo(m))) meanings.push(m);
+    }
+    const joined = meanings.join(', ');
+    if (keep.koStart !== null && normKo(joined) !== normKo(keep.ko)) {
+      edits.push({ start: keep.koStart, end: keep.koEnd, text: joined });
+      merged.push(`${keep.en} ${joined}`);
+    }
+    for (const w of ws) if (w !== keep) { edits.push({ start: w.start, end: w.end, text: '' }); removed.add(w); count++; }
+  }
+  // 단어가 모두 지워진 문제는 번호도 지움
+  for (const q of qs) {
+    if (q.num && q.words.length && q.words.every(w => removed.has(w))) edits.push({ start: q.num.start, end: q.num.end, text: '' });
+  }
+  edits.sort((a, b) => b.start - a.start);
+  const CUT = '\u0000';   // 지운 자리 표시 — 지운 것만 남은 줄은 통째로 없앰
+  let out = text;
+  for (const e of edits) out = out.slice(0, e.start) + (e.text || CUT) + out.slice(e.end);
+  out = out.split('\n')
+    .filter(l => !(l.includes(CUT) && !l.replaceAll(CUT, '').trim()))
+    .map(l => (l.includes(CUT) ? l.replaceAll(CUT, '').replace(/[ \t]{2,}/g, ' ').replace(/[ \t]+$/, '') : l))
+    .join('\n');
+  return { text: out, count, merged };
+}
+
 function issuesHTML(a) {
   const items = [];
   for (const [, c] of a.typos) {
@@ -563,8 +637,12 @@ function issuesHTML(a) {
       ? `혹시 ${sug.map(x => `<button class="fix" data-fix="${esc(c)}" data-to="${esc(x)}">${esc(x)}</button>`).join('')} 인가요?`
       : '사전에 없는 단어예요.'}</span><button class="ign" data-ignore="${esc(c)}" title="이 단어는 앞으로 철자 검사에서 빼요">무시</button></div>`);
   }
+  if (a.dupInList.length > 1) {
+    items.push(`<div class="issue warn"><span class="ib">중복</span><span class="it">같은 단어가 <b>${a.dupInList.length}개</b> 겹쳐 있어요</span><button class="fix" data-dedupe="*">모두 하나만 남기기</button></div>`);
+  }
   for (const d of a.dupInList) {
-    items.push(`<div class="issue warn"><span class="ib">중복</span><span class="it"><b>${esc(d.en)}</b> 이 단원에 ${d.nos.length}번 있어요 (${[...new Set(d.nos)].map(n => `${esc(n)}번`).join(', ')})</span></div>`);
+    const kos = [...new Set(d.ko.map(normKo))];
+    items.push(`<div class="issue warn"><span class="ib">중복</span><span class="it"><b>${esc(d.en)}</b> 이 단원에 ${d.nos.length}번 있어요 (${[...new Set(d.nos)].map(n => `${esc(n)}번`).join(', ')})${kos.length > 1 ? ` · 뜻이 달라서 남길 때 합쳐요` : ''}</span><button class="fix" data-dedupe="${esc(d.k)}">하나만 남기기</button></div>`);
   }
   for (const d of a.dupOut.slice(0, 5)) {
     const where = [...new Set(d.others.map(o => o.where))];
@@ -640,14 +718,32 @@ function renderUnit() {
   loadDictionary().then(ok => { if (ok && $raw.isConnected) update(); });
   let pvTimer = null;
 
-  // 철자 추천 누르면 고치기 · 무시
+  // 입력칸 전체를 바꾸되 Ctrl+Z로 되돌릴 수 있게
+  const replaceRaw = next => {
+    if (next === $raw.value) return;
+    const top = $raw.scrollTop;
+    $raw.focus();
+    $raw.select();
+    let ok = false;
+    try { ok = document.execCommand('insertText', false, next); } catch (e) { ok = false; }
+    if (!ok) $raw.value = next;
+    $raw.setSelectionRange(0, 0);
+    $raw.scrollTop = top;
+    onInput(true);
+  };
+
+  // 철자 고치기 · 무시 · 중복 정리
   $preview.addEventListener('click', e => {
     const fix = e.target.closest('[data-fix]');
     const ign = e.target.closest('[data-ignore]');
-    if (fix) {
+    const dd = e.target.closest('[data-dedupe]');
+    if (dd) {
+      const r = dedupeRaw($raw.value, dd.dataset.dedupe === '*' ? null : dd.dataset.dedupe);
+      replaceRaw(r.text);
+      toast(r.merged.length ? `중복 ${r.count}개를 지우고 뜻을 합쳤어요 · Ctrl+Z로 되돌리기` : `중복 ${r.count}개를 지웠어요 · Ctrl+Z로 되돌리기`);
+    } else if (fix) {
       const re = new RegExp(`(^|[^A-Za-z])${escRe(fix.dataset.fix)}(?=$|[^A-Za-z])`, 'g');
-      $raw.value = $raw.value.replace(re, `$1${fix.dataset.to}`);
-      onInput(true);
+      replaceRaw($raw.value.replace(re, `$1${fix.dataset.to}`));
       toast(`‘${fix.dataset.fix}’ → ‘${fix.dataset.to}’로 고쳤어요`);
     } else if (ign) {
       ignoreWord(ign.dataset.ignore);
