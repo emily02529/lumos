@@ -63,7 +63,7 @@ const ui = {
   bookId: null,
   unitId: null,
   open: {},
-  test: { bookId: null, unitIds: [], mode: 'en', shuffle: false, title: '', rows: null, show: 'test' },
+  test: { bookId: null, unitIds: [], mode: 'en', shuffle: false, count: null, title: '', rows: null, show: 'test' },
 };
 let pendingFlush = null;   // 단원 편집 중 저장 대기 작업
 
@@ -626,6 +626,8 @@ function renderTest() {
   t.unitIds = t.unitIds.filter(id => unit(b, id));
   const units = b.units.filter(u => t.unitIds.includes(u.id));
   const total = units.reduce((s, u) => s + wordCount(u), 0);
+  const pick = () => (t.count ? Math.min(t.count, total) : total);
+  const presets = [10, 20, 30, 50].filter(n => n < total);
   const defTitle = units.length ? `${units.map(u => u.name).join(', ')} 단어 시험` : '단어 시험';
   const allOn = b.units.length && units.length === b.units.length;
 
@@ -660,7 +662,18 @@ function renderTest() {
         </div>
       </div>
       <div class="step">
-        <div class="step-head"><span class="num">4</span><h3>제목과 옵션</h3></div>
+        <div class="step-head"><span class="num">4</span><h3>단어 수</h3>${total ? `<span class="muted" style="font-size:14px">고른 단원에 단어 ${total}개</span>` : ''}</div>
+        <div class="row" style="gap:10px">
+          <div class="seg" id="tCountSeg">
+            <button data-count="" class="${!t.count || t.count >= total ? 'on' : ''}" ${total ? '' : 'disabled'}>전체</button>
+            ${presets.map(n => `<button data-count="${n}" class="${t.count === n ? 'on' : ''}">${n}</button>`).join('')}
+          </div>
+          <span class="row" style="gap:6px"><input type="number" class="input" id="tCount" min="1" max="${total || 1}" value="${total ? pick() : ''}" ${total ? '' : 'disabled'} style="width:96px;text-align:center" aria-label="단어 수 직접 입력"><span class="muted">개</span></span>
+        </div>
+        <p class="muted" style="font-size:13.5px;margin:10px 0 0">전체보다 적게 고르면 그만큼 무작위로 뽑아요.</p>
+      </div>
+      <div class="step">
+        <div class="step-head"><span class="num">5</span><h3>제목과 옵션</h3></div>
         <input type="text" id="tTitle" style="max-width:520px;margin-bottom:10px" value="${esc(t.title || defTitle)}" placeholder="${esc(defTitle)}" aria-label="시험지 제목">
         <label class="switch-row" style="max-width:520px">
           <span class="txt"><b>단어 순서 섞기</b><small>문제 번호 구분 없이 무작위 순서로 출제해요</small></span>
@@ -668,7 +681,7 @@ function renderTest() {
         </label>
       </div>
       <div class="cta-bar">
-        <button class="btn primary xl" id="tMake" ${total ? '' : 'disabled'}>${total ? `${total}단어로 시험지 만들기` : '단원을 골라 주세요'}</button>
+        <button class="btn primary xl" id="tMake" ${total ? '' : 'disabled'}>${total ? `${pick()}단어로 시험지 만들기` : '단원을 골라 주세요'}</button>
       </div>
     </div>
     <div id="tResult"></div>`;
@@ -686,9 +699,27 @@ function renderTest() {
   $main.querySelector('#tTitle').oninput = e => { t.title = e.target.value; if (t.rows) showResult(); };
   $main.querySelector('#tMake').onclick = () => make(true);
 
+  const setCount = (n, remake) => {
+    t.count = !n || n >= total ? null : Math.max(1, Math.floor(n));
+    $main.querySelectorAll('#tCountSeg button').forEach(x => x.classList.toggle('on', (+x.dataset.count || null) === t.count));
+    if (total) $main.querySelector('#tMake').textContent = `${pick()}단어로 시험지 만들기`;
+    if (remake && t.rows) make(false);
+  };
+  $main.querySelectorAll('#tCountSeg button').forEach(el => el.onclick = () => {
+    setCount(+el.dataset.count || null, true);
+    $main.querySelector('#tCount').value = pick();
+  });
+  const $cnt = $main.querySelector('#tCount');
+  $cnt.oninput = () => { const v = parseInt($cnt.value, 10); if (v > 0) setCount(v, false); };
+  $cnt.onchange = () => {
+    const v = parseInt($cnt.value, 10);
+    setCount(v > 0 ? v : null, true);
+    $cnt.value = pick();
+  };
+
   function make(scroll) {
     if (!units.length) return;
-    t.rows = buildRows(units, t.mode, t.shuffle);
+    t.rows = buildRows(units, t.mode, t.shuffle, t.count);
     showResult();
     if (scroll) $main.querySelector('#tResult').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
@@ -701,7 +732,7 @@ function renderTest() {
       <div class="card" style="scroll-margin-top:80px">
         <div class="result-head">
           <div class="seg" role="tablist"><button data-show="test" class="${t.show === 'test' ? 'on' : ''}">시험지</button><button data-show="answer" class="${t.show === 'answer' ? 'on' : ''}">답안지</button></div>
-          ${t.mode === 'mix' || t.shuffle ? `<button class="btn ghost sm" id="tRe">${ic('shuffle', 'sm')}다시 섞기</button>` : ''}
+          ${t.mode === 'mix' || t.shuffle || pick() < total ? `<button class="btn ghost sm" id="tRe">${ic('shuffle', 'sm')}다시 섞기</button>` : ''}
           <span class="spacer"></span>
           <button class="btn icon" id="tPrint" title="인쇄" aria-label="인쇄">${ic('print')}</button>
           <button class="btn" id="tAnsPdf">답안지 PDF</button>
@@ -722,12 +753,22 @@ function renderTest() {
 const shuffleArr = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 
 /* rows: { type:'section', name } | { type:'word', qno, qstart, en, ko, blank:'en'|'ko'|null } */
-function buildRows(units, mode, shuffle) {
+function buildRows(units, mode, shuffle, count = null) {
   let words = [];
   for (const u of units) {
     for (const q of u.questions) {
       q.words.forEach((w, i) => words.push({ type: 'word', unit: u.name, qno: q.no, qstart: i === 0, en: w.en, ko: w.ko }));
     }
+  }
+  // 단어 수를 정했으면 무작위로 뽑되, 원래 순서는 유지
+  if (count && count < words.length) {
+    const keep = new Set(shuffleArr(words.map((_, i) => i)).slice(0, count));
+    let last = null;
+    words = words.filter((_, i) => keep.has(i)).map(w => {
+      const key = w.unit + '|' + w.qno;
+      const qstart = key !== last; last = key;
+      return { ...w, qstart };
+    });
   }
   if (mode === 'list') return words.map(w => ({ ...w, blank: null })).flatMap(sectionize(units.length > 1));
 
