@@ -1,13 +1,27 @@
-/* LUMOS 단어장 · 단어시험지 (나루 데이터베이스 연동) */
-import { createNaru } from 'https://sdk.naru.pub/sdk/1.1.0/naru.js';
+/* LUMOS 단어장 · 단어시험지 (Firebase 연동) */
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import { getFirestore, collection, doc, getDocs, setDoc, deleteDoc, writeBatch } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 
-const NARU_SITE = 'lumos';
+// 웹 앱 설정값 (공개되어도 되는 값입니다. 접근 제어는 Firestore 보안 규칙과 로그인으로 합니다)
+const firebaseConfig = {
+  apiKey: 'AIzaSyBrN7MTWCAs2qVBzAUjEGrFRkv-yVILxYw',
+  authDomain: 'lumos-988e9.firebaseapp.com',
+  projectId: 'lumos-988e9',
+  storageBucket: 'lumos-988e9.firebasestorage.app',
+  messagingSenderId: '795153527123',
+  appId: '1:795153527123:web:8233b79fff6efe602af1a6',
+};
+
 const COLLECTIONS = ['books', 'units'];
+const EMAIL_KEY = 'lumos-login-email';
 const LOCAL_KEY = 'lumos-vocab-v1';           // 예전(브라우저 저장) 데이터
 const MIGRATED_KEY = 'lumos-vocab-migrated';
 
-const naru = createNaru({ site: NARU_SITE });
-let admin = null;
+const fbApp = initializeApp(firebaseConfig);
+const auth = getAuth(fbApp);
+const fs = getFirestore(fbApp);
+let user = null;
 
 const $main = document.getElementById('main');
 const $side = document.getElementById('sidebar');
@@ -68,9 +82,8 @@ const bookData = b => ({ name: b.name, order: b.order });
 const unitData = (b, u) => ({ bookId: b.id, name: u.name, order: u.order, raw: u.raw, updatedAt: u.updatedAt });
 
 async function fetchAll(name) {
-  const out = [];
-  for await (const { documents } of admin.collection(name).pages({ size: 100 })) out.push(...documents);
-  return out;
+  const snap = await getDocs(collection(fs, name));
+  return snap.docs.map(d => ({ id: d.id, data: d.data() }));
 }
 
 async function loadAll() {
@@ -87,7 +100,7 @@ async function loadAll() {
     const b = map.get(d.data.bookId);
     if (!b) continue;
     const raw = d.data.raw || '';
-    b.units.push({ id: d.id, name: d.data.name, order: d.data.order ?? 0, raw, questions: parse(raw), updatedAt: d.data.updatedAt || Date.parse(d.updatedAt) });
+    b.units.push({ id: d.id, name: d.data.name, order: d.data.order ?? 0, raw, questions: parse(raw), updatedAt: d.data.updatedAt || Date.now() });
   }
   db.books.forEach(b => b.units.sort(byOrder));
 }
@@ -100,24 +113,31 @@ async function persist(fn, okMsg) {
     return true;
   } catch (e) {
     console.error(e);
-    if (e && e.code === 'AUTH_REQUIRED') { admin = null; toast('로그인이 만료됐어요. 다시 로그인해 주세요'); renderLogin(); }
-    else toast(e && e.message ? e.message : '저장하지 못했어요. 인터넷 연결을 확인해 주세요');
+    toast(errorText(e, '저장하지 못했어요. 인터넷 연결을 확인해 주세요'));
     return false;
   }
 }
-const saveBook = b => persist(() => admin.collection('books').set(b.id, bookData(b)));
-const saveUnit = (b, u) => persist(() => admin.collection('units').set(u.id, unitData(b, u)));
+function errorText(e, fallback) {
+  const code = (e && e.code) || '';
+  if (code === 'permission-denied') return '권한이 없어요. 다시 로그인하거나 Firestore 보안 규칙을 확인해 주세요';
+  if (code === 'unauthenticated') return '로그인이 만료됐어요. 다시 로그인해 주세요';
+  if (code === 'unavailable') return '서버에 연결하지 못했어요. 인터넷 연결을 확인해 주세요';
+  if (code === 'resource-exhausted') return '오늘 무료 사용량을 넘었어요. 내일 다시 시도해 주세요';
+  return fallback + (code ? ` (${code})` : '');
+}
+const saveBook = b => persist(() => setDoc(doc(fs, 'books', b.id), bookData(b)));
+const saveUnit = (b, u) => persist(() => setDoc(doc(fs, 'units', u.id), unitData(b, u)));
 
-/* 요청 하나가 64KiB를 넘지 않게 나눠서 batch */
+/* 한 번에 최대 500개까지라 나눠서 batch */
 async function batchAll(writes) {
-  let chunk = [], size = 0;
-  const send = async () => { if (chunk.length) await admin.batch(chunk); chunk = []; size = 0; };
-  for (const w of writes) {
-    const s = JSON.stringify(w).length * 3;   // 한글은 UTF-8로 최대 3바이트
-    if (chunk.length && (chunk.length >= 100 || size + s > 48000)) await send();
-    chunk.push(w); size += s;
+  for (let i = 0; i < writes.length; i += 400) {
+    const batch = writeBatch(fs);
+    for (const w of writes.slice(i, i + 400)) {
+      if (w.set) batch.set(doc(fs, w.collection, w.set.id), w.set.data);
+      else batch.delete(doc(fs, w.collection, w.delete.id));
+    }
+    await batch.commit();
   }
-  await send();
 }
 const setW = (collection, id, data) => ({ collection, set: { id, data } });
 const delW = (collection, id) => ({ collection, delete: { id } });
@@ -208,7 +228,7 @@ function go(view, opts = {}) {
 }
 document.addEventListener('click', e => {
   const g = e.target.closest('[data-go]');
-  if (g && admin) {
+  if (g && user) {
     const v = g.dataset.go;
     if (v === 'test') openTest(ui.bookId, ui.view === 'unit' && ui.unitId ? [ui.unitId] : null);
     else go(v, v === 'home' ? { bookId: null, unitId: null } : {});
@@ -216,7 +236,7 @@ document.addEventListener('click', e => {
 });
 
 function render() {
-  if (!admin) return renderLogin();
+  if (!user) return renderLogin();
   document.body.classList.remove('signed-out');
   $logout.hidden = false;
   document.querySelectorAll('.tab').forEach(t => {
@@ -231,28 +251,49 @@ const crumb = parts => `<nav class="crumb">${parts.map((p, i) =>
   (i ? ic('chevR') : '') + (p.go ? `<a ${p.go}>${esc(p.t)}</a>` : `<span>${esc(p.t)}</span>`)).join('')}</nav>`;
 
 /* ================= login ================= */
-function renderLogin(errMsg = '') {
+function renderLogin(errMsg = '', keepEmail = null) {
   document.body.classList.add('signed-out');
   $logout.hidden = true;
   $side.innerHTML = '';
-  $main.innerHTML = `<div class="card login">
+  let saved = '';
+  try { saved = localStorage.getItem(EMAIL_KEY) || ''; } catch (e) { /* */ }
+  if (keepEmail !== null) saved = keepEmail;
+  $main.innerHTML = `<form class="card login" id="loginForm">
     <span class="tile" style="--c:#3182f6">${ic('lock')}</span>
     <h1>LUMOS 단어장</h1>
-    <button class="btn primary xl" id="signIn">관리자 로그인</button>
+    <input type="email" class="input" id="lgEmail" placeholder="이메일" autocomplete="username" value="${esc(saved)}" required style="margin-bottom:8px">
+    <input type="password" class="input" id="lgPw" placeholder="비밀번호" autocomplete="current-password" required style="margin-bottom:16px">
+    <button class="btn primary xl" id="signIn" type="submit">로그인</button>
     ${errMsg ? `<div class="err">${esc(errMsg)}</div>` : ''}
-  </div>`;
-  $main.querySelector('#signIn').onclick = async e => {
-    e.target.disabled = true;
-    try { await naru.auth.signIn({ collections: COLLECTIONS }); }
-    catch (err) { console.error(err); renderLogin(err.message || '로그인하지 못했어요'); }
+  </form>`;
+  const $f = $main.querySelector('#loginForm');
+  setTimeout(() => $main.querySelector(saved ? '#lgPw' : '#lgEmail').focus(), 30);
+  $f.onsubmit = async e => {
+    e.preventDefault();
+    const email = $f.querySelector('#lgEmail').value.trim();
+    const pw = $f.querySelector('#lgPw').value;
+    const btn = $f.querySelector('#signIn');
+    btn.disabled = true; btn.textContent = '로그인 중…';
+    try {
+      await signInWithEmailAndPassword(auth, email, pw);
+      try { localStorage.setItem(EMAIL_KEY, email); } catch (er) { /* */ }
+    } catch (err) {
+      console.error(err);
+      const c = err.code || '';
+      renderLogin(
+        c === 'auth/invalid-credential' || c === 'auth/wrong-password' || c === 'auth/user-not-found' || c === 'auth/invalid-email' ? '이메일 또는 비밀번호가 맞지 않아요'
+        : c === 'auth/too-many-requests' ? '시도가 너무 많았어요. 잠시 후 다시 해 주세요'
+        : c === 'auth/network-request-failed' ? '인터넷 연결을 확인해 주세요'
+        : `로그인하지 못했어요 (${c || err.message})`, email);
+    }
   };
 }
 $logout.onclick = async () => {
   const ok = await modal({ title: '로그아웃할까요?', ok: '로그아웃' });
   if (!ok) return;
   if (pendingFlush) pendingFlush();
-  try { await admin.signOut(); } catch (e) { /* ignore */ }
-  admin = null; db = { books: [] };
+  try { await signOut(auth); } catch (e) { /* ignore */ }
+  user = null; db = { books: [] };
   renderLogin();
 };
 
@@ -534,7 +575,7 @@ function renderUnit() {
     const ok = await modal({ title: `‘${esc(u.name)}’ 단원을 삭제할까요?`, desc: `단어 ${wordCount(u)}개가 지워지고, 되돌릴 수 없어요.`, ok: '삭제', danger: true });
     if (!ok) return;
     clearTimeout(timer); pendingFlush = null;
-    if (await persist(() => admin.collection('units').delete(u.id), '단원을 삭제했어요')) {
+    if (await persist(() => deleteDoc(doc(fs, 'units', u.id)), '단원을 삭제했어요')) {
       b.units = b.units.filter(x => x !== u); go('book', { unitId: null });
     }
   };
@@ -845,29 +886,23 @@ function toast(msg, loading = false) {
 /* ================= sync ================= */
 // 다른 선생님이 고친 내용을 탭으로 돌아올 때 다시 불러오기 (단원 편집 중에는 건너뜀)
 document.addEventListener('visibilitychange', async () => {
-  if (document.visibilityState !== 'visible' || !admin || pendingFlush || ui.view === 'unit' || $modal.innerHTML) return;
+  if (document.visibilityState !== 'visible' || !user || pendingFlush || ui.view === 'unit' || $modal.innerHTML) return;
   try { await loadAll(); render(); } catch (e) { /* 다음 기회에 */ }
 });
 window.addEventListener('beforeunload', e => { if (pendingFlush) { pendingFlush(); e.preventDefault(); } });
 
 /* ================= boot ================= */
-async function boot() {
+$main.innerHTML = `<div class="loading"><span class="spin"></span></div>`;
+onAuthStateChanged(auth, async u => {
+  user = u;
+  if (!u) { db = { books: [] }; return renderLogin(); }
   $main.innerHTML = `<div class="loading"><span class="spin"></span></div>`;
-  try {
-    admin = await naru.auth.session();
-  } catch (e) {
-    console.error(e);
-    admin = null;
-  }
-  if (!admin) return renderLogin();
   try {
     await loadAll();
   } catch (e) {
     console.error(e);
-    if (e && (e.code === 'AUTH_REQUIRED' || e.code === 'ACCESS_DENIED')) { admin = null; return renderLogin(e.message); }
-    $main.innerHTML = `<div class="card login"><h1>단어장을 불러오지 못했어요</h1><p class="muted">${esc(e.message || '')}</p><button class="btn primary" onclick="location.reload()">다시 시도</button></div>`;
+    $main.innerHTML = `<div class="card login"><h1>단어장을 불러오지 못했어요</h1><p class="muted">${esc(errorText(e, '잠시 후 다시 시도해 주세요'))}</p><button class="btn primary" onclick="location.reload()">다시 시도</button></div>`;
     return;
   }
   render();
-}
-boot();
+});

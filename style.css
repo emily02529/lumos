@@ -205,7 +205,7 @@ main#main > * { animation: rise .35s var(--ease) both; }
 .spacer { flex: 1; }
 .muted { color: var(--text-3); }
 
-.input, input[type=text], select, textarea {
+.input, input[type=text], input[type=email], input[type=password], select, textarea {
   width: 100%;
   border: 0; border-radius: var(--r-sm);
   background: var(--fill); padding: 12px 14px;

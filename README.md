@@ -1,7 +1,7 @@
 # LUMOS 단어장 · 단어시험지
 
 LUMOS 영어학원용 단어장 관리와 단어시험지(A4 PDF) 생성 사이트입니다.
-[나루](https://naru.pub) 사이트 `lumos`(https://lumos.naru.pub)에 올려 쓰며, 단어장은 나루 데이터베이스에 저장되어 어느 컴퓨터에서든 같은 내용이 보입니다.
+https://lumos.naru.pub 에서 쓰며, 단어장은 Firebase(무료)에 저장되어 어느 컴퓨터에서든 같은 내용이 보입니다.
 
 ## 기능
 
@@ -18,19 +18,23 @@ LUMOS 영어학원용 단어장 관리와 단어시험지(A4 PDF) 생성 사이�
   - 영어 쓰기 / 뜻 쓰기 / 반반 섞기(무작위)
   - 단어 순서 섞기 옵션
   - 시험지 PDF와 답안지 PDF (A4 세로)
-- 나루 관리자(사이트 주인) 계정으로 로그인해서 사용
+- 학원 공용 계정(이메일/비밀번호)으로 로그인해서 사용
 - 백업 탭에서 `.json`으로 내보내기/불러오기
 
-## 나루 설정
+## 저장소 (Firebase, 무료 Spark 플랜)
 
-1. 이 저장소의 파일을 `lumos` 나루 사이트에 그대로 올립니다 (`_naru/collections.json` 포함).
-   `books`, `units` 컬렉션이 관리자 전용 읽기/쓰기로 만들어집니다.
-2. [나루 제어판](https://naru.pub/database)의 **웹사이트 관리자 로그인**에
-   페이지 주소 `https://lumos.naru.pub/`와 컬렉션 `books`, `units`를 등록합니다.
-3. https://lumos.naru.pub/ 에서 **관리자 로그인**을 누릅니다.
+단어장은 Firebase 프로젝트 `lumos-988e9`의 Firestore(`books`, `units` 컬렉션)에 저장됩니다.
+사이트 파일은 https://lumos.naru.pub 에 올려 둡니다(나루 정적 호스팅, 무료).
+
+처음 한 번 설정:
+1. Firebase 콘솔 → Firestore Database → **규칙** 탭에 `firestore.rules` 내용을 붙여넣고 게시
+2. Authentication → 로그인 방법: **이메일/비밀번호** 사용 설정
+3. Authentication → 사용자: 학원 공용 계정 추가
+4. Authentication → 설정 → 사용자 작업: **가입(계정 생성) 사용 설정 해제**
+   (아무나 계정을 만들어 들어오지 못하게)
 
 ## 파일
 
 - `index.html`, `style.css`, `app.js`: 앱
-- `_naru/collections.json`: 나루 데이터베이스 컬렉션 설정
+- `firestore.rules`: Firestore 보안 규칙 (로그인한 사용자만 읽기/쓰기)
 - `lib/html2pdf.bundle.min.js`: PDF 생성 라이브러리 ([html2pdf.js](https://github.com/eKoopmans/html2pdf.js) 0.10.1, MIT)
