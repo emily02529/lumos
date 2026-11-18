@@ -2,6 +2,7 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import { getFirestore, collection, doc, getDocs, setDoc, deleteDoc, writeBatch } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+import { loadDictionary, isReady as spellReady, check as spellCheck, suggest as spellSuggest, complete as spellComplete, cleanToken } from './spell.js';
 
 // 웹 앱 설정값 (공개되어도 되는 값입니다. 접근 제어는 Firestore 보안 규칙과 로그인으로 합니다)
 const firebaseConfig = {
@@ -77,7 +78,7 @@ const fmtDate = t => { const d = new Date(t); return `${d.getMonth() + 1}월 ${d
 const nb = n => n.toLocaleString('ko-KR');
 const byOrder = (a, b) => (a.order ?? 0) - (b.order ?? 0);
 
-/* ================= Naru storage ================= */
+/* ================= storage (Firestore) ================= */
 const bookData = b => ({ name: b.name, order: b.order });
 const unitData = (b, u) => ({ bookId: b.id, name: u.name, order: u.order, raw: u.raw, updatedAt: u.updatedAt });
 
@@ -496,6 +497,82 @@ function renderBook() {
 
 /* ================= unit editor ================= */
 const SAMPLE = '01 policy 정책 employee 종업원 gain 얻다\n02 gestural 몸짓의 nod 고개를 끄덕이다';
+const IGNORE_KEY = 'lumos-spell-ignore';
+const normEn = s => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
+const normKo = s => String(s || '').replace(/\s+/g, '');
+const escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function ignoredWords() {
+  try { return new Set(JSON.parse(localStorage.getItem(IGNORE_KEY) || '[]')); } catch (e) { return new Set(); }
+}
+function ignoreWord(w) {
+  const set = ignoredWords(); set.add(w.toLowerCase());
+  try { localStorage.setItem(IGNORE_KEY, JSON.stringify([...set])); } catch (e) { /* */ }
+}
+
+/* 다른 단원에 있는 단어들 (중복 확인 · 자동완성에 씀) */
+function wordBank(exceptUnitId) {
+  const map = new Map();
+  for (const bk of db.books) for (const un of bk.units) {
+    if (un.id === exceptUnitId) continue;
+    for (const q of un.questions) for (const w of q.words) {
+      if (!w.en) continue;
+      const k = normEn(w.en);
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push({ en: w.en, ko: w.ko, where: `${bk.name} · ${un.name}`, unitName: un.name });
+    }
+  }
+  return map;
+}
+
+/* 중복 · 철자 확인 */
+function analyze(qs, bank, typing = null) {
+  const seen = new Map();
+  for (const q of qs) for (const w of q.words) {
+    if (!w.en) continue;
+    const k = normEn(w.en);
+    if (!seen.has(k)) seen.set(k, { en: w.en, ko: [], nos: [] });
+    const v = seen.get(k);
+    v.nos.push(q.no);
+    if (w.ko) v.ko.push(w.ko);
+  }
+  const dupInList = [...seen.entries()].filter(([, v]) => v.nos.length > 1).map(([k, v]) => ({ k, ...v }));
+  const dupOut = [];
+  for (const [k, v] of seen) {
+    if (!bank.has(k)) continue;
+    const others = bank.get(k);
+    const mine = v.ko[0] || '';
+    const diff = mine ? others.find(o => o.ko && normKo(o.ko) !== normKo(mine)) : null;
+    dupOut.push({ k, en: v.en, others, diff });
+  }
+  const typos = new Map();
+  if (spellReady()) {
+    const ig = ignoredWords();
+    for (const q of qs) for (const w of q.words) for (const t of (w.en || '').split(/\s+/)) {
+      const c = cleanToken(t);
+      if (c && c !== typing && !ig.has(c.toLowerCase()) && !spellCheck(c)) typos.set(c.toLowerCase(), c);
+    }
+  }
+  return { dupInList, dupIn: new Set(dupInList.map(d => d.k)), dupOut, dupOutKeys: new Set(dupOut.map(d => d.k)), typos };
+}
+
+function issuesHTML(a) {
+  const items = [];
+  for (const [, c] of a.typos) {
+    const sug = spellSuggest(c, 3).map(x => (/^[A-Z]/.test(c) ? x[0].toUpperCase() + x.slice(1) : x));
+    items.push(`<div class="issue err"><span class="ib">철자</span><span class="it"><b>${esc(c)}</b> ${sug.length
+      ? `혹시 ${sug.map(x => `<button class="fix" data-fix="${esc(c)}" data-to="${esc(x)}">${esc(x)}</button>`).join('')} 인가요?`
+      : '사전에 없는 단어예요.'}</span><button class="ign" data-ignore="${esc(c)}" title="이 단어는 앞으로 철자 검사에서 빼요">무시</button></div>`);
+  }
+  for (const d of a.dupInList) {
+    items.push(`<div class="issue warn"><span class="ib">중복</span><span class="it"><b>${esc(d.en)}</b> 이 단원에 ${d.nos.length}번 있어요 (${[...new Set(d.nos)].map(n => `${esc(n)}번`).join(', ')})</span></div>`);
+  }
+  for (const d of a.dupOut.slice(0, 5)) {
+    const where = [...new Set(d.others.map(o => o.where))];
+    items.push(`<div class="issue info"><span class="ib">다른 단원</span><span class="it"><b>${esc(d.en)}</b> ${esc(where.slice(0, 2).join(', '))}${where.length > 2 ? ` 외 ${where.length - 2}곳` : ''}에도 있어요${d.diff ? ` · 거기서는 뜻이 ‘${esc(d.diff.ko)}’예요` : ''}</span></div>`);
+  }
+  if (a.dupOut.length > 5) items.push(`<div class="issue info more">다른 단원과 겹치는 단어가 ${a.dupOut.length - 5}개 더 있어요</div>`);
+  return items.length ? `<div class="issues">${items.join('')}</div>` : '';
+}
 
 function renderUnit() {
   const b = book(ui.bookId), u = unit(b, ui.unitId);
@@ -515,11 +592,15 @@ function renderUnit() {
     <div class="editor-grid">
       <div class="card">
         <div class="card-title">단어 입력</div>
-        <textarea id="raw" spellcheck="false" placeholder="${esc(SAMPLE)}">${esc(u.raw)}</textarea>
+        <div class="raw-wrap">
+          <textarea id="raw" spellcheck="false" autocomplete="off" placeholder="${esc(SAMPLE)}">${esc(u.raw)}</textarea>
+          <div class="ac" id="ac" hidden></div>
+        </div>
         <div class="hint">
           <div class="hint-item"><span class="n">1</span><span><b>문제 번호 → 영어 → 뜻</b> 순서로 입력하면 오른쪽 표가 바로 채워져요.</span></div>
           <div class="hint-item"><span class="n">2</span><span><code>01</code> <code>2</code> <code>3.</code>처럼 숫자가 나오면 새 문제예요. 문제마다 단어 수는 자유예요.</span></div>
           <div class="hint-item"><span class="n">3</span><span><code>give up</code>, <code>고개를 끄덕이다</code>처럼 띄어 쓴 표현도 하나로 묶여요.</span></div>
+          <div class="hint-item"><span class="n">4</span><span>영어를 두 글자 이상 치면 자동완성이 떠요. 전에 입력한 단어는 뜻까지 채워 주고, <code>Tab</code>으로 넣어요.</span></div>
           ${u.raw ? '' : `<div class="example" id="useSample"><span class="lbl">예시 넣어보기</span>${esc(SAMPLE).replace('\n', '<br>')}</div>`}
         </div>
       </div>
@@ -532,17 +613,47 @@ function renderUnit() {
   const $raw = $main.querySelector('#raw');
   const $state = $main.querySelector('#saveState');
   let timer = null;
+  const tokenAtCaret = () => {
+    const pos = $raw.selectionStart;
+    if (pos !== $raw.selectionEnd) return null;
+    const m = $raw.value.slice(0, pos).match(/[A-Za-z][A-Za-z'-]*$/);
+    if (!m || /^[A-Za-z]/.test($raw.value.slice(pos))) return null;
+    return { text: m[0], start: pos - m[0].length, end: pos };
+  };
   const setState = (txt, saving) => { $state.classList.toggle('saving', !!saving); $state.lastChild.textContent = txt; };
 
+  const bank = wordBank(u.id);
+  const $preview = $main.querySelector('#preview');
   const update = () => {
     const qs = parse($raw.value);
     const nw = qs.reduce((s, q) => s + q.words.length, 0);
-    $main.querySelector('#pvStats').innerHTML = qs.length ? `<span class="pill">문제 ${qs.length}</span><span class="pill blue">단어 ${nw}</span>` : '';
-    $main.querySelector('#preview').innerHTML = qs.length ? wordTableHTML(qs)
+    const typing = document.activeElement === $raw ? tokenAtCaret()?.text : null;   // 아직 치고 있는 단어는 철자 검사에서 뺌
+    const a = analyze(qs, bank, typing);
+    const nIssue = a.typos.size + a.dupInList.length;
+    $main.querySelector('#pvStats').innerHTML = qs.length
+      ? `${nIssue ? `<span class="pill orange">확인 ${nIssue}</span>` : ''}<span class="pill">문제 ${qs.length}</span><span class="pill blue">단어 ${nw}</span>` : '';
+    $preview.innerHTML = qs.length ? issuesHTML(a) + wordTableHTML(qs, a)
       : `<div class="preview-empty"><span class="tile md" style="--c:#8b95a1">${ic('doc')}</span>왼쪽에 단어를 입력하면<br>여기에 표가 만들어져요.</div>`;
     return qs;
   };
   update();
+  loadDictionary().then(ok => { if (ok && $raw.isConnected) update(); });
+  let pvTimer = null;
+
+  // 철자 추천 누르면 고치기 · 무시
+  $preview.addEventListener('click', e => {
+    const fix = e.target.closest('[data-fix]');
+    const ign = e.target.closest('[data-ignore]');
+    if (fix) {
+      const re = new RegExp(`(^|[^A-Za-z])${escRe(fix.dataset.fix)}(?=$|[^A-Za-z])`, 'g');
+      $raw.value = $raw.value.replace(re, `$1${fix.dataset.to}`);
+      onInput(true);
+      toast(`‘${fix.dataset.fix}’ → ‘${fix.dataset.to}’로 고쳤어요`);
+    } else if (ign) {
+      ignoreWord(ign.dataset.ignore);
+      update();
+    }
+  });
 
   const flushUnit = async () => {
     clearTimeout(timer); timer = null;
@@ -553,8 +664,9 @@ function renderUnit() {
     if ($state.isConnected) setState(ok ? '저장됨' : '저장 실패 · 다시 입력하면 재시도해요', !ok);
     return ok;
   };
-  const onInput = () => {
-    update();
+  const onInput = (now = false) => {
+    clearTimeout(pvTimer);
+    if (now === true) update(); else pvTimer = setTimeout(update, 150);
     setState('저장 중…', true);
     clearTimeout(timer);
     pendingFlush = flushUnit;
@@ -562,7 +674,108 @@ function renderUnit() {
   };
   $raw.addEventListener('input', onInput);
   const sample = $main.querySelector('#useSample');
-  if (sample) sample.onclick = () => { $raw.value = SAMPLE; sample.remove(); onInput(); $raw.focus(); };
+  if (sample) sample.onclick = () => { $raw.value = SAMPLE; sample.remove(); onInput(true); $raw.focus(); };
+
+  /* ---------- 자동완성 ---------- */
+  const acList = [];
+  {
+    const seenAc = new Set();
+    for (const [k, arr] of bank) for (const o of arr) {
+      const key = k + '|' + normKo(o.ko);
+      if (seenAc.has(key)) continue;
+      seenAc.add(key);
+      acList.push({ k, en: o.en, ko: o.ko, where: o.unitName });
+    }
+    acList.sort((x, y) => x.k.length - y.k.length || (x.k < y.k ? -1 : 1));
+  }
+  const $ac = $main.querySelector('#ac');
+  const ac = { items: [], idx: 0, tok: null, moved: false };
+  const closeAC = () => { $ac.hidden = true; ac.items = []; ac.tok = null; };
+  const drawAC = () => {
+    const n = ac.tok.text.length;
+    $ac.innerHTML = ac.items.map((it, i) => `<div class="ac-item ${i === ac.idx ? 'on' : ''}" data-i="${i}">
+        <span class="ac-en"><b>${esc(it.en.slice(0, n))}</b>${esc(it.en.slice(n))}</span>
+        ${it.ko ? `<span class="ac-ko">${esc(it.ko)}</span>` : ''}
+        <span class="ac-src">${it.ko ? esc(it.where) : '사전'}</span></div>`).join('')
+      + `<div class="ac-foot"><kbd>Tab</kbd> 넣기 · <kbd>↑</kbd><kbd>↓</kbd> 고르기 · <kbd>Esc</kbd> 닫기</div>`;
+    $ac.hidden = false;
+  };
+  const placeAC = () => {
+    const cs = getComputedStyle($raw);
+    const mirror = document.createElement('div');
+    for (const k of ['boxSizing', 'width', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth', 'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'wordSpacing', 'tabSize']) mirror.style[k] = cs[k];
+    Object.assign(mirror.style, { position: 'absolute', visibility: 'hidden', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', top: '0', left: '0', borderStyle: 'solid' });
+    mirror.textContent = $raw.value.slice(0, $raw.selectionStart);
+    const mark = document.createElement('span');
+    mark.textContent = '\u200b';
+    mirror.appendChild(mark);
+    $raw.parentNode.appendChild(mirror);
+    const lh = parseFloat(cs.lineHeight) || 24;
+    const x = mark.offsetLeft - $raw.scrollLeft;
+    const y = mark.offsetTop - $raw.scrollTop + lh;
+    mirror.remove();
+    const maxLeft = Math.max(0, $raw.clientWidth - $ac.offsetWidth);
+    $ac.style.left = `${Math.min(Math.max(0, x - 8), maxLeft)}px`;
+    $ac.style.top = `${Math.min(y + 4, $raw.clientHeight)}px`;
+  };
+  const refreshAC = () => {
+    const tok = tokenAtCaret();
+    if (!tok || tok.text.length < 2) return closeAC();
+    const p = tok.text.toLowerCase();
+    const items = [];
+    for (const e of acList) {
+      if (items.length >= 4) break;
+      if (e.k.startsWith(p) && e.ko) items.push(e);
+    }
+    const have = new Set(items.map(i => i.k));
+    for (const w of spellComplete(p, 8)) {
+      if (items.length >= 6) break;
+      if (!have.has(w)) items.push({ k: w, en: w });
+    }
+    if (!items.length || (items.length === 1 && !items[0].ko && items[0].k === p)) return closeAC();
+    // 대문자로 시작했으면 사전 단어도 대문자로
+    if (/^[A-Z]/.test(tok.text)) items.forEach(it => { if (!it.ko) it.en = it.en[0].toUpperCase() + it.en.slice(1); });
+    Object.assign(ac, { items, tok, idx: 0, moved: false });
+    drawAC();
+    placeAC();
+  };
+  const acceptAC = i => {
+    const it = ac.items[i];
+    if (!it || !ac.tok) return;
+    const text = it.ko ? `${it.en} ${it.ko} ` : `${it.en} `;
+    const { start, end } = ac.tok;
+    closeAC();
+    $raw.focus();
+    $raw.setSelectionRange(start, end);
+    let ok = false;
+    try { ok = document.execCommand('insertText', false, text); } catch (e) { ok = false; }
+    if (!ok) { $raw.setRangeText(text, start, end, 'end'); onInput(); }
+  };
+  $raw.addEventListener('keydown', e => {
+    if ($ac.hidden || e.isComposing) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      ac.idx = (ac.idx + (e.key === 'ArrowDown' ? 1 : -1) + ac.items.length) % ac.items.length;
+      ac.moved = true;
+      drawAC();
+    } else if (e.key === 'Tab' || (e.key === 'Enter' && ac.moved)) {
+      e.preventDefault();
+      acceptAC(ac.idx);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeAC();
+    }
+  });
+  $raw.addEventListener('input', refreshAC);
+  $raw.addEventListener('click', refreshAC);
+  $raw.addEventListener('keyup', e => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) refreshAC(); });
+  $raw.addEventListener('blur', () => setTimeout(closeAC, 120));
+  $raw.addEventListener('scroll', () => { if (!$ac.hidden) placeAC(); });
+  $ac.addEventListener('mousedown', e => {
+    e.preventDefault();
+    const el = e.target.closest('.ac-item');
+    if (el) acceptAC(+el.dataset.i);
+  });
 
   $main.querySelector('#unitName').addEventListener('change', async e => {
     const n = e.target.value.trim(); if (!n) { e.target.value = u.name; return; }
@@ -588,14 +801,28 @@ function renderUnit() {
   };
 }
 
-function wordTableHTML(qs) {
+function enHTML(w, a) {
+  if (!a) return esc(w.en);
+  let h = w.en.split(/(\s+)/).map(t => {
+    const c = cleanToken(t);
+    if (!c || !a.typos.has(c.toLowerCase())) return esc(t);
+    const i = t.indexOf(c);
+    return esc(t.slice(0, i)) + `<span class="typo">${esc(c)}</span>` + esc(t.slice(i + c.length));
+  }).join('');
+  const k = normEn(w.en);
+  if (a.dupIn.has(k)) h += ' <span class="tag warn">중복</span>';
+  else if (a.dupOutKeys.has(k)) h += ' <span class="tag info">다른 단원</span>';
+  return h;
+}
+
+function wordTableHTML(qs, a = null) {
   let h = `<div class="table-wrap"><table class="words"><thead><tr><th>문제</th><th>#</th><th>영어</th><th>뜻</th></tr></thead><tbody>`;
   let n = 0;
   for (const q of qs) {
     q.words.forEach((w, i) => {
       n++;
       h += `<tr class="${i === 0 ? 'qstart' : ''}"><td class="q">${i === 0 ? `<span>${esc(q.no)}</span>` : ''}</td><td class="n">${n}</td>
-        <td class="${w.en ? 'en' : 'warn'}">${w.en ? esc(w.en) : '영어를 입력해 주세요'}</td>
+        <td class="${w.en ? 'en' : 'warn'}">${w.en ? enHTML(w, a) : '영어를 입력해 주세요'}</td>
         <td class="${w.ko ? 'ko' : 'warn'}">${w.ko ? esc(w.ko) : '뜻을 입력해 주세요'}</td></tr>`;
     });
   }
