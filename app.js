@@ -619,7 +619,7 @@ function dedupeRaw(text, onlyKey = null) {
     if (q.num && q.words.length && q.words.every(w => removed.has(w))) edits.push({ start: q.num.start, end: q.num.end, text: '' });
   }
   edits.sort((a, b) => b.start - a.start);
-  const CUT = '\u0000';   // 지운 자리 표시 — 지운 것만 남은 줄은 통째로 없앰
+  const CUT = String.fromCharCode(0);   // 지운 자리 표시 — 지운 것만 남은 줄은 통째로 없앰
   let out = text;
   for (const e of edits) out = out.slice(0, e.start) + (e.text || CUT) + out.slice(e.end);
   out = out.split('\n')
