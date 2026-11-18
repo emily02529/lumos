@@ -64,7 +64,7 @@ const ui = {
   bookId: null,
   unitId: null,
   open: {},
-  test: { bookId: null, unitIds: [], mode: 'en', shuffle: false, count: null, title: '', rows: null, show: 'test' },
+  test: { bookId: null, unitIds: [], qsel: {}, mode: 'en', shuffle: false, count: null, title: '', rows: null, show: 'test' },
 };
 let pendingFlush = null;   // 단원 편집 중 저장 대기 작업
 
@@ -926,12 +926,39 @@ function wordTableHTML(qs, a = null) {
 }
 
 /* ================= test maker ================= */
+// [1,2,3,5] → "01~03, 05번"
+function rangeLabel(nos) {
+  const ns = [...new Set(nos.map(n => parseInt(n, 10)).filter(n => !isNaN(n)))].sort((a, b) => a - b);
+  const p = x => String(x).padStart(2, '0');
+  const parts = [];
+  for (let i = 0; i < ns.length; i++) {
+    let j = i;
+    while (j + 1 < ns.length && ns[j + 1] === ns[j] + 1) j++;
+    parts.push(i === j ? p(ns[i]) : `${p(ns[i])}~${p(ns[j])}`);
+    i = j;
+  }
+  return parts.join(', ') + '번';
+}
+// "1-5, 8, 10~12" → Set{1,2,3,4,5,8,10,11,12}
+function parseRange(str) {
+  const out = new Set();
+  for (const part of String(str).split(/[,，]/)) {
+    const m = part.trim().match(/^(\d+)\s*(?:[-~]\s*(\d+))?$/);
+    if (!m) continue;
+    let a = +m[1], b = m[2] ? +m[2] : a;
+    if (a > b) [a, b] = [b, a];
+    for (let i = a; i <= b && i - a < 1000; i++) out.add(i);
+  }
+  return out;
+}
+
 function openTest(bookId, unitIds) {
   const t = ui.test;
   const b = book(bookId) || book(t.bookId) || db.books[0];
   if (b && b.id !== t.bookId) t.unitIds = [];
   t.bookId = b ? b.id : null;
   if (unitIds) t.unitIds = unitIds;
+  t.qsel = {};
   t.rows = null; t.title = '';
   go('test', bookId ? { bookId } : {});
 }
@@ -948,10 +975,14 @@ function renderTest() {
   if (!b) { b = db.books[0]; t.bookId = b.id; t.unitIds = []; }
   t.unitIds = t.unitIds.filter(id => unit(b, id));
   const units = b.units.filter(u => t.unitIds.includes(u.id));
-  const total = units.reduce((s, u) => s + wordCount(u), 0);
+  for (const id of Object.keys(t.qsel)) if (!t.unitIds.includes(id)) delete t.qsel[id];
+  const selOf = u => (t.qsel[u.id] ? new Set(t.qsel[u.id]) : null);   // null = 전체 문제
+  const pickedQs = u => { const sel = selOf(u); return sel ? u.questions.filter(q => sel.has(q.no)) : u.questions; };
+  const total = units.reduce((s, u) => s + pickedQs(u).reduce((a, q) => a + q.words.length, 0), 0);
+  const unitLabel = u => (selOf(u) ? `${u.name} (${rangeLabel(t.qsel[u.id])})` : u.name);
   const pick = () => (t.count ? Math.min(t.count, total) : total);
   const presets = [10, 20, 30, 50].filter(n => n < total);
-  const defTitle = units.length ? `${units.map(u => u.name).join(', ')} 단어 시험` : '단어 시험';
+  const defTitle = units.length ? `${units.map(unitLabel).join(', ')} 단어 시험` : '단어 시험';
   const allOn = b.units.length && units.length === b.units.length;
 
   const modes = [
@@ -976,8 +1007,25 @@ function renderTest() {
           <span class="box">${ic('check')}</span><span class="name">${esc(u.name)}</span><span class="count">${wordCount(u)}</span></label>`).join('')}</div>`
           : `<p class="muted" style="margin:0">이 교재에는 아직 단원이 없어요.</p>`}
       </div>
+      ${units.length ? `<div class="step">
+        <div class="step-head"><span class="num">3</span><h3>문제 고르기</h3><span class="muted" style="font-size:14px">번호를 눌러 켜고 꺼요</span></div>
+        ${units.map(u => {
+          const sel = selOf(u);
+          const on = sel ? sel.size : u.questions.length;
+          return `<div class="qpick" data-u="${u.id}">
+            <div class="qpick-head">
+              <b>${esc(u.name)}</b><span class="pill ${sel ? 'blue' : ''}">${sel ? `${on}/${u.questions.length}문제` : `전체 ${u.questions.length}문제`}</span>
+              <span class="spacer"></span>
+              <input type="text" class="input qrange" placeholder="범위 입력 예: 1-5, 8" aria-label="${esc(u.name)} 문제 범위">
+              <button class="btn sm ${sel ? 'ghost' : 'tonal'}" data-qall>전체</button>
+              <button class="btn sm ghost" data-qnone>모두 끄기</button>
+            </div>
+            <div class="qchips">${u.questions.map(q => `<button class="qchip ${!sel || sel.has(q.no) ? 'on' : ''}" data-q="${esc(q.no)}" title="${esc(q.words.map(w => w.en).join(', '))}">${esc(q.no)}<small>${q.words.length}단어</small></button>`).join('')}</div>
+          </div>`;
+        }).join('')}
+      </div>` : ''}
       <div class="step">
-        <div class="step-head"><span class="num">3</span><h3>출제 방식</h3></div>
+        <div class="step-head"><span class="num">${units.length ? 4 : 3}</span><h3>출제 방식</h3></div>
         <div class="mode-pick">
           ${modes.map(([v, l, d, cells]) => `<label class="mode"><input type="radio" name="mode" value="${v}" ${t.mode === v ? 'checked' : ''}>
             <span class="radio"></span><div class="demo">${v === 'mix' ? `<div style="display:flex;flex-direction:column;gap:4px;flex:1"><div style="display:flex;gap:6px">${demo(cells.slice(0, 2))}</div><div style="display:flex;gap:6px">${demo(cells.slice(2))}</div></div>` : demo(cells)}</div>
@@ -985,7 +1033,7 @@ function renderTest() {
         </div>
       </div>
       <div class="step">
-        <div class="step-head"><span class="num">4</span><h3>단어 수</h3>${total ? `<span class="muted" style="font-size:14px">고른 단원에 단어 ${total}개</span>` : ''}</div>
+        <div class="step-head"><span class="num">${units.length ? 5 : 4}</span><h3>단어 수</h3>${total ? `<span class="muted" style="font-size:14px">고른 문제에 단어 ${total}개</span>` : ''}</div>
         <div class="row" style="gap:10px">
           <div class="seg" id="tCountSeg">
             <button data-count="" class="${!t.count || t.count >= total ? 'on' : ''}" ${total ? '' : 'disabled'}>전체</button>
@@ -996,7 +1044,7 @@ function renderTest() {
         <p class="muted" style="font-size:13.5px;margin:10px 0 0">전체보다 적게 고르면 그만큼 무작위로 뽑아요.</p>
       </div>
       <div class="step">
-        <div class="step-head"><span class="num">5</span><h3>제목과 옵션</h3></div>
+        <div class="step-head"><span class="num">${units.length ? 6 : 5}</span><h3>제목과 옵션</h3></div>
         <input type="text" id="tTitle" style="max-width:520px;margin-bottom:10px" value="${esc(t.title || defTitle)}" placeholder="${esc(defTitle)}" aria-label="시험지 제목">
         <label class="switch-row" style="max-width:520px">
           <span class="txt"><b>단어 순서 섞기</b><small>문제 번호 구분 없이 무작위 순서로 출제해요</small></span>
@@ -1004,7 +1052,7 @@ function renderTest() {
         </label>
       </div>
       <div class="cta-bar">
-        <button class="btn primary xl" id="tMake" ${total ? '' : 'disabled'}>${total ? `${pick()}단어로 시험지 만들기` : '단원을 골라 주세요'}</button>
+        <button class="btn primary xl" id="tMake" ${total ? '' : 'disabled'}>${total ? `${pick()}단어로 시험지 만들기` : units.length ? '문제를 골라 주세요' : '단원을 골라 주세요'}</button>
       </div>
     </div>
     <div id="tResult"></div>`;
@@ -1021,6 +1069,35 @@ function renderTest() {
   $main.querySelector('#tShuffle').onchange = e => { t.shuffle = e.target.checked; if (t.rows) make(false); };
   $main.querySelector('#tTitle').oninput = e => { t.title = e.target.value; if (t.rows) showResult(); };
   $main.querySelector('#tMake').onclick = () => make(true);
+
+  // 문제 고르기
+  const rerender = () => { const y = window.scrollY; reset(); renderTest(); window.scrollTo(0, y); };
+  $main.querySelectorAll('.qpick').forEach(box => {
+    const u = unit(b, box.dataset.u);
+    const allNos = u.questions.map(q => q.no);
+    const setSel = nos => {
+      if (nos.length === allNos.length) delete t.qsel[u.id];
+      else t.qsel[u.id] = allNos.filter(n => nos.includes(n));
+      rerender();
+    };
+    box.querySelectorAll('.qchip').forEach(ch => ch.onclick = () => {
+      const cur = selOf(u) || new Set(allNos);
+      if (cur.has(ch.dataset.q)) cur.delete(ch.dataset.q); else cur.add(ch.dataset.q);
+      setSel([...cur]);
+    });
+    box.querySelector('[data-qall]').onclick = () => setSel(allNos);
+    box.querySelector('[data-qnone]').onclick = () => setSel([]);
+    const $r = box.querySelector('.qrange');
+    const applyRange = () => {
+      const want = parseRange($r.value);
+      if (!want.size) return toast('예: 1-5, 8 처럼 입력해 주세요');
+      const nos = allNos.filter(n => want.has(parseInt(n, 10)));
+      if (!nos.length) return toast('그 범위에 해당하는 문제가 없어요');
+      setSel(nos);
+    };
+    $r.onkeydown = e => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); applyRange(); } };
+    $r.onchange = () => { if ($r.value.trim()) applyRange(); };
+  });
 
   const setCount = (n, remake) => {
     t.count = !n || n >= total ? null : Math.max(1, Math.floor(n));
@@ -1042,13 +1119,14 @@ function renderTest() {
 
   function make(scroll) {
     if (!units.length) return;
-    t.rows = buildRows(units, t.mode, t.shuffle, t.count);
+    const picked = units.map(u => ({ ...u, questions: pickedQs(u) })).filter(u => u.questions.length);
+    t.rows = buildRows(picked, t.mode, t.shuffle, t.count);
     showResult();
     if (scroll) $main.querySelector('#tResult').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
   function showResult() {
     const title = (t.title || defTitle).trim();
-    const sub = `${b.name} · ${units.map(u => u.name).join(', ')}`;
+    const sub = `${b.name} · ${units.map(unitLabel).join(', ')}`;
     const sheet = kind => sheetHTML({ kind, title, sub, rows: t.rows, mode: t.mode });
     const r = $main.querySelector('#tResult');
     r.innerHTML = `
