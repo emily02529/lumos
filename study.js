@@ -12,6 +12,7 @@ const firebaseConfig = {
 };
 const fs = getFirestore(initializeApp(firebaseConfig));
 const PREF_KEY = 'lumos-study-pref';
+const WRONG_KEY = 'lumos-study-wrong';   // 오답 노트 (이 기기에만 저장)
 const $app = document.getElementById('app');
 
 /* ---------- 공통 ---------- */
@@ -34,7 +35,25 @@ function toast(msg) {
 }
 function loadPref() { try { return JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch (e) { return {}; } }
 function savePref() {
-  try { localStorage.setItem(PREF_KEY, JSON.stringify({ bookId: S.bookId, mode: S.mode, dir: S.dir, shuffle: S.shuffle })); } catch (e) { /* */ }
+  try { localStorage.setItem(PREF_KEY, JSON.stringify({ bookId: S.bookId, mode: S.mode, dir: S.dir, shuffle: S.shuffle, count: S.count })); } catch (e) { /* */ }
+}
+
+/* ---------- 오답 노트 ---------- */
+const wkey = w => norm(w.en) + '|' + norm(w.ko);
+function loadWrong() { try { const a = JSON.parse(localStorage.getItem(WRONG_KEY)); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+function saveWrong(list) { try { localStorage.setItem(WRONG_KEY, JSON.stringify(list.slice(-500))); } catch (e) { /* */ } }
+function markWrong(w) {
+  const list = loadWrong();
+  const k = wkey(w);
+  const old = list.find(x => wkey(x) === k);
+  if (old) { old.miss = (old.miss || 1) + 1; old.at = Date.now(); }
+  else list.push({ en: w.en, ko: w.ko, from: w.from || '', miss: 1, at: Date.now() });
+  saveWrong(list);
+}
+function markRight(w) {
+  const k = wkey(w);
+  const list = loadWrong();
+  if (list.some(x => wkey(x) === k)) saveWrong(list.filter(x => wkey(x) !== k));
 }
 
 /* 선생님 화면과 같은 규칙으로 단어 입력을 읽음 */
@@ -65,7 +84,7 @@ let keyHandler = null;   // 지금 화면의 키보드 단축키
 const pref = loadPref();
 const S = {
   books: [], bookId: pref.bookId || null, units: [], unitIds: [], qsel: {},
-  mode: pref.mode || 'card', dir: pref.dir || 'en2ko', shuffle: pref.shuffle !== false,
+  mode: pref.mode || 'card', dir: pref.dir || 'en2ko', shuffle: pref.shuffle !== false, count: pref.count || null,
   deck: [], i: 0, results: [], flipped: false, locked: false,
 };
 
@@ -107,8 +126,23 @@ function renderSetup() {
   const total = pickedWords().length;
   const allOn = S.units.length && units.length === S.units.length;
   const dirs = [['en2ko', '영어 → 뜻'], ['ko2en', '뜻 → 영어'], ['mix', '섞기']];
+  const wrong = loadWrong();
+  const pick = () => (S.count ? Math.min(S.count, total) : total);
+  const presets = [10, 20, 30, 50].filter(n => n < total);
   $app.innerHTML = `
     <div class="hero"><h1>단어 공부</h1><p>공부할 범위를 고르고 시작해요.</p></div>
+    ${wrong.length ? `<div class="wnote">
+      <div class="wnote-head">
+        <span class="wnote-ico">${ic('x')}</span>
+        <div class="wnote-t"><b>오답 노트 <span>${wrong.length}</span></b><small>틀렸거나 몰랐던 단어예요. 맞히면 노트에서 빠져요.</small></div>
+      </div>
+      <div class="wnote-words">${wrong.slice(-6).reverse().map(w => `<span>${esc(w.en)}</span>`).join('')}${wrong.length > 6 ? `<span class="more">+${wrong.length - 6}</span>` : ''}</div>
+      <div class="wnote-actions">
+        <button class="btn" id="wCard">${ic('card')}카드로 복습</button>
+        <button class="btn primary" id="wQuiz">${ic('quiz')}퀴즈로 복습</button>
+        <button class="btn ghost sm" id="wClear">비우기</button>
+      </div>
+    </div>` : ''}
     <div class="card">
       <div class="step">
         <div class="step-head"><span class="num">1</span><h3>교재</h3></div>
@@ -155,9 +189,20 @@ function renderSetup() {
             <span class="switch"><input type="checkbox" id="sShuffle" ${S.shuffle ? 'checked' : ''}><span></span></span>
           </label>
         </div>
+      </div>
+      <div class="step">
+        <div class="step-head"><span class="num">5</span><h3>문항 수</h3>${total ? `<span class="muted" style="font-size:14px">고른 범위에 단어 ${total}개</span>` : ''}</div>
+        <div class="row" style="gap:10px">
+          <div class="seg" id="sCountSeg">
+            <button data-count="" class="${!S.count || S.count >= total ? 'on' : ''}">전체</button>
+            ${presets.map(n => `<button data-count="${n}" class="${S.count === n ? 'on' : ''}">${n}</button>`).join('')}
+          </div>
+          <span class="row" style="gap:6px"><input type="number" class="input" id="sCount" min="1" max="${total || 1}" value="${total ? pick() : ''}" inputmode="numeric" style="width:96px;text-align:center" aria-label="문항 수 직접 입력"><span class="muted">개</span></span>
+        </div>
+        <p class="muted" style="font-size:13.5px;margin:10px 0 0">전체보다 적게 고르면 그만큼 무작위로 뽑아요.</p>
       </div>` : ''}
       <div class="cta-bar">
-        <button class="btn primary xl" id="sStart" ${total ? '' : 'disabled'}>${total ? `${total}단어 공부 시작` : S.bookId ? (units.length ? '문제를 골라 주세요' : '단원을 골라 주세요') : '교재를 골라 주세요'}</button>
+        <button class="btn primary xl" id="sStart" ${total ? '' : 'disabled'}>${total ? `${pick()}${S.mode === 'quiz' ? '문항 퀴즈' : '단어 공부'} 시작` : S.bookId ? (units.length ? '문제를 골라 주세요' : '단원을 골라 주세요') : '교재를 골라 주세요'}</button>
       </div>
     </div>`;
 
@@ -212,16 +257,48 @@ function renderSetup() {
   });
   const sh = $app.querySelector('#sShuffle');
   if (sh) sh.onchange = e => { S.shuffle = e.target.checked; savePref(); };
-  $app.querySelector('#sStart').onclick = () => start(pickedWords());
+  const ctaText = () => { if (total) $app.querySelector('#sStart').textContent = `${pick()}${S.mode === 'quiz' ? '문항 퀴즈' : '단어 공부'} 시작`; };
+  $app.querySelectorAll('[data-mode]').forEach(el => el.addEventListener('click', ctaText));
+  const setCount = n => {
+    S.count = !n || n >= total ? null : Math.max(1, Math.floor(n));
+    savePref();
+    $app.querySelectorAll('#sCountSeg button').forEach(x => x.classList.toggle('on', (+x.dataset.count || null) === (S.count && S.count < total ? S.count : null)));
+    ctaText();
+  };
+  $app.querySelectorAll('#sCountSeg button').forEach(el => el.onclick = () => { setCount(+el.dataset.count || null); $app.querySelector('#sCount').value = pick(); });
+  const $cnt = $app.querySelector('#sCount');
+  if ($cnt) {
+    $cnt.oninput = () => { const v = parseInt($cnt.value, 10); if (v > 0) setCount(v); };
+    $cnt.onchange = () => { const v = parseInt($cnt.value, 10); setCount(v > 0 ? v : null); $cnt.value = pick(); };
+  }
+  $app.querySelector('#sStart').onclick = () => {
+    let words = pickedWords();
+    if (S.count && S.count < words.length) {
+      const keep = new Set(shuffle(words.map((_, i) => i)).slice(0, S.count));
+      words = words.filter((_, i) => keep.has(i));
+    }
+    start(words);
+  };
+  // 오답 노트
+  const review = mode => { S.mode = mode; savePref(); start(loadWrong(), { review: true }); };
+  const wc = $app.querySelector('#wCard'); if (wc) wc.onclick = () => review('card');
+  const wq = $app.querySelector('#wQuiz'); if (wq) wq.onclick = () => review('quiz');
+  const wx = $app.querySelector('#wClear'); if (wx) wx.onclick = () => {
+    if (!confirm('오답 노트를 비울까요?')) return;
+    saveWrong([]); toast('오답 노트를 비웠어요'); renderSetup();
+  };
 }
 
 /* ---------- 2. 공부 ---------- */
-function start(words) {
+function start(words, opt = {}) {
   if (!words.length) return;
+  S.review = !!opt.review;
   S.deck = (S.shuffle ? shuffle(words) : words).map(w => ({
     ...w, ask: S.dir === 'mix' ? (Math.random() < .5 ? 'en2ko' : 'ko2en') : S.dir,
   }));
-  S.pool = pickedWords().length >= 4 ? pickedWords() : S.units.flatMap(u => u.questions.flatMap(q => q.words)).filter(w => w.en && w.ko);
+  // 객관식 오답 보기 후보: 고른 범위 → 부족하면 교재 전체 · 오답 노트까지
+  S.pool = [...words, ...pickedWords()];
+  if (S.pool.length < 8) S.pool.push(...S.units.flatMap(u => u.questions.flatMap(q => q.words)).filter(w => w.en && w.ko), ...loadWrong());
   S.i = 0; S.results = [];
   window.scrollTo(0, 0);
   if (S.mode === 'card') renderCard(); else renderQuiz();
@@ -255,7 +332,7 @@ function renderCard() {
     <div class="keys"><kbd>Space</kbd> 뒤집기 · <kbd>←</kbd> 몰라요 · <kbd>→</kbd> 알아요</div>`;
   const $fc = $app.querySelector('#fc');
   const flip = () => { S.flipped = !S.flipped; $fc.classList.toggle('flipped', S.flipped); };
-  const answer = known => { S.results.push({ ...c, ok: known }); S.i++; renderCard(); };
+  const answer = known => { S.results.push({ ...c, ok: known }); if (known) markRight(c); else markWrong(c); S.i++; renderCard(); };
   // 탭 = 뒤집기, 좌우로 밀기 = 몰라요/알아요
   let sx = null, moved = false;
   $fc.onpointerdown = e => { sx = e.clientX; moved = false; };
@@ -315,6 +392,7 @@ function renderQuiz() {
     $choices.classList.add('locked');
     const ok = opts[i] === right;
     S.results.push({ ...c, ok, picked: opts[i] });
+    if (ok) markRight(c); else markWrong(c);
     $choices.querySelectorAll('.choice').forEach((el, j) => {
       if (opts[j] === right) el.classList.add('ok');
       else if (j === i) el.classList.add('bad');
@@ -349,16 +427,17 @@ function renderResult() {
       <div class="big">${good}<small> / ${total}</small></div>
       <div class="msg">${msg}</div>
       <div class="sub">${isQuiz ? `맞힌 문제 ${good}개 · 틀린 문제 ${bad.length}개` : `알아요 ${good}개 · 몰라요 ${bad.length}개`}</div>
+      ${bad.length ? `<div class="note-saved">${ic('check')}${isQuiz ? '틀린' : '몰라요'} 단어 ${bad.length}개를 오답 노트에 담았어요</div>` : S.review ? `<div class="note-saved">${ic('check')}복습한 단어를 오답 노트에서 뺐어요</div>` : ''}
       <div class="result-actions">
         ${bad.length ? `<button class="btn primary xl" id="rBad">${isQuiz ? '틀린 것만 다시 풀기' : '몰라요만 다시 보기'} (${bad.length})</button>` : ''}
         <button class="btn ${bad.length ? '' : 'primary'} xl" id="rAgain">처음부터 다시</button>
-        <button class="btn ghost" id="rSetup">범위 다시 고르기</button>
+        <button class="btn ghost" id="rSetup">${S.review ? '처음 화면으로' : '범위 다시 고르기'}</button>
       </div>
     </div>
     ${bad.length ? `<div class="card wrong-list"><div class="card-title">${isQuiz ? '틀린 단어' : '몰라요 단어'}</div>
       ${bad.map(r => `<div class="wrong-row"><b>${esc(r.en)}</b><span>${esc(r.ko)}${isQuiz ? `<em>내가 고른 답: ${esc(r.picked)}</em>` : ''}</span></div>`).join('')}
     </div>` : ''}`;
-  const again = list => start(list.map(({ ok, picked, ask, ...w }) => w));
+  const again = list => start(list.map(({ ok, picked, ask, ...w }) => w), { review: S.review });
   const rb = $app.querySelector('#rBad'); if (rb) rb.onclick = () => again(bad);
   $app.querySelector('#rAgain').onclick = () => again(S.results);
   $app.querySelector('#rSetup').onclick = renderSetup;

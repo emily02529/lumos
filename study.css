@@ -105,3 +105,19 @@
 
 .notice-big { text-align: center; padding: 56px 20px; color: var(--text-3); line-height: 1.7; }
 .notice-big b { display: block; color: var(--text); font-size: 18px; margin-bottom: 6px; }
+
+/* 오답 노트 */
+.wnote { background: var(--surface); border-radius: var(--r-lg); box-shadow: var(--shadow-1); padding: 20px 22px; margin-bottom: 16px; }
+.wnote-head { display: flex; align-items: center; gap: 12px; }
+.wnote-ico { width: 40px; height: 40px; border-radius: 12px; background: #fff0f1; color: #f04452; display: grid; place-items: center; flex: none; }
+.wnote-t b { display: block; font-size: 17px; letter-spacing: -0.02em; }
+.wnote-t b span { color: #f04452; }
+.wnote-t small { color: var(--text-3); font-size: 13.5px; font-weight: 500; }
+.wnote-words { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 16px; }
+.wnote-words span { background: var(--fill); border-radius: 999px; padding: 4px 12px; font-size: 14px; font-weight: 600; color: var(--text-2); }
+.wnote-words span.more { color: var(--text-3); font-weight: 500; }
+.wnote-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.wnote-actions .btn:not(.sm) { flex: 1; min-width: 140px; }
+.wnote-actions .btn.sm { margin-left: auto; color: var(--text-3); }
+.note-saved { display: inline-flex; align-items: center; gap: 6px; margin-top: 14px; font-size: 14px; font-weight: 600; color: #08875e; background: #e6f8f1; padding: 6px 12px; border-radius: 999px; }
+.note-saved svg { width: 16px; height: 16px; }
