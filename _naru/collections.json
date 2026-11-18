@@ -1,0 +1,6 @@
+{
+  "collections": {
+    "books": { "read": "admin", "write": "admin" },
+    "units": { "read": "admin", "write": "admin", "indexes": ["bookId"] }
+  }
+}

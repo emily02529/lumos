@@ -1,11 +1,19 @@
-/* LUMOS 단어장 · 단어시험지 */
-'use strict';
+/* LUMOS 단어장 · 단어시험지 (나루 데이터베이스 연동) */
+import { createNaru } from 'https://sdk.naru.pub/sdk/1.1.0/naru.js';
 
-const STORE_KEY = 'lumos-vocab-v1';
+const NARU_SITE = 'lumos';
+const COLLECTIONS = ['books', 'units'];
+const LOCAL_KEY = 'lumos-vocab-v1';           // 예전(브라우저 저장) 데이터
+const MIGRATED_KEY = 'lumos-vocab-migrated';
+
+const naru = createNaru({ site: NARU_SITE });
+let admin = null;
+
 const $main = document.getElementById('main');
 const $side = document.getElementById('sidebar');
 const $stage = document.getElementById('pdf-stage');
 const $modal = document.getElementById('modal-root');
+const $logout = document.getElementById('logout');
 
 /* ================= icons ================= */
 const ICONS = {
@@ -26,6 +34,7 @@ const ICONS = {
   sheet: '<path d="M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M9 8h6M9 12h6M9 16h3"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
   cloud: '<path d="M7 18a4.5 4.5 0 0 1-.5-9A6 6 0 0 1 18 8a4 4 0 0 1-.5 10z"/>',
+  lock: '<rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
 };
 const ic = (name, cls = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 
@@ -33,8 +42,8 @@ const COLORS = ['#3182f6', '#00b493', '#ff8a00', '#f04452', '#7d5cf6', '#00a3d9'
 const colorOf = id => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return COLORS[h % COLORS.length]; };
 const tile = (id, size = '', icon = 'folder') => `<span class="tile ${size}" style="--c:${colorOf(id)}">${ic(icon)}</span>`;
 
-/* ================= data ================= */
-let db = load();
+/* ================= state ================= */
+let db = { books: [] };   // { books: [{ id, name, order, units: [{ id, name, order, raw, questions, updatedAt }] }] }
 const ui = {
   view: 'home',
   bookId: null,
@@ -42,18 +51,8 @@ const ui = {
   open: {},
   test: { bookId: null, unitIds: [], mode: 'en', shuffle: false, title: '', rows: null, show: 'test' },
 };
+let pendingFlush = null;   // 단원 편집 중 저장 대기 작업
 
-function load() {
-  try {
-    const d = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (d && Array.isArray(d.books)) return d;
-  } catch (e) { /* ignore */ }
-  return { books: [] };
-}
-function save() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(db)); return true; }
-  catch (e) { toast('저장하지 못했어요. 브라우저 저장공간을 확인해 주세요'); return false; }
-}
 const uid = () => Math.random().toString(36).slice(2, 8) + Date.now().toString(36);
 const book = id => db.books.find(b => b.id === id);
 const unit = (b, id) => b && b.units.find(u => u.id === id);
@@ -61,6 +60,68 @@ const wordCount = u => u.questions.reduce((s, q) => s + q.words.length, 0);
 const bookWords = b => b.units.reduce((s, u) => s + wordCount(u), 0);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmtDate = t => { const d = new Date(t); return `${d.getMonth() + 1}월 ${d.getDate()}일`; };
+const nb = n => n.toLocaleString('ko-KR');
+const byOrder = (a, b) => (a.order ?? 0) - (b.order ?? 0);
+
+/* ================= Naru storage ================= */
+const bookData = b => ({ name: b.name, order: b.order });
+const unitData = (b, u) => ({ bookId: b.id, name: u.name, order: u.order, raw: u.raw, updatedAt: u.updatedAt });
+
+async function fetchAll(name) {
+  const out = [];
+  for await (const { documents } of admin.collection(name).pages({ size: 100 })) out.push(...documents);
+  return out;
+}
+
+async function loadAll() {
+  const [books, units] = await Promise.all(COLLECTIONS.map(fetchAll));
+  const map = new Map();
+  db = {
+    books: books.map(d => {
+      const b = { id: d.id, name: d.data.name, order: d.data.order ?? 0, units: [] };
+      map.set(b.id, b);
+      return b;
+    }).sort(byOrder),
+  };
+  for (const d of units) {
+    const b = map.get(d.data.bookId);
+    if (!b) continue;
+    const raw = d.data.raw || '';
+    b.units.push({ id: d.id, name: d.data.name, order: d.data.order ?? 0, raw, questions: parse(raw), updatedAt: d.data.updatedAt || Date.parse(d.updatedAt) });
+  }
+  db.books.forEach(b => b.units.sort(byOrder));
+}
+
+/* 서버 저장 실패를 한곳에서 처리 */
+async function persist(fn, okMsg) {
+  try {
+    await fn();
+    if (okMsg) toast(okMsg);
+    return true;
+  } catch (e) {
+    console.error(e);
+    if (e && e.code === 'AUTH_REQUIRED') { admin = null; toast('로그인이 만료됐어요. 다시 로그인해 주세요'); renderLogin(); }
+    else toast(e && e.message ? e.message : '저장하지 못했어요. 인터넷 연결을 확인해 주세요');
+    return false;
+  }
+}
+const saveBook = b => persist(() => admin.collection('books').set(b.id, bookData(b)));
+const saveUnit = (b, u) => persist(() => admin.collection('units').set(u.id, unitData(b, u)));
+
+/* 요청 하나가 64KiB를 넘지 않게 나눠서 batch */
+async function batchAll(writes) {
+  let chunk = [], size = 0;
+  const send = async () => { if (chunk.length) await admin.batch(chunk); chunk = []; size = 0; };
+  for (const w of writes) {
+    const s = JSON.stringify(w).length * 3;   // 한글은 UTF-8로 최대 3바이트
+    if (chunk.length && (chunk.length >= 100 || size + s > 48000)) await send();
+    chunk.push(w); size += s;
+  }
+  await send();
+}
+const setW = (collection, id, data) => ({ collection, set: { id, data } });
+const delW = (collection, id) => ({ collection, delete: { id } });
+const writesFor = books => books.flatMap(b => [setW('books', b.id, bookData(b)), ...b.units.map(u => setW('units', u.id, unitData(b, u)))]);
 
 /* ================= parser =================
  *  - 숫자만 있는 토큰(01, 2, 3. 4)) → 새 문제 번호
@@ -139,6 +200,7 @@ function modal({ title, desc = '', input = null, ok = '확인', cancel = '취소
 
 /* ================= navigation ================= */
 function go(view, opts = {}) {
+  if (pendingFlush) pendingFlush();
   Object.assign(ui, { view }, opts);
   if (ui.bookId) ui.open[ui.bookId] = true;
   render();
@@ -146,7 +208,7 @@ function go(view, opts = {}) {
 }
 document.addEventListener('click', e => {
   const g = e.target.closest('[data-go]');
-  if (g) {
+  if (g && admin) {
     const v = g.dataset.go;
     if (v === 'test') openTest(ui.bookId, ui.view === 'unit' && ui.unitId ? [ui.unitId] : null);
     else go(v, v === 'home' ? { bookId: null, unitId: null } : {});
@@ -154,6 +216,9 @@ document.addEventListener('click', e => {
 });
 
 function render() {
+  if (!admin) return renderLogin();
+  document.body.classList.remove('signed-out');
+  $logout.hidden = false;
   document.querySelectorAll('.tab').forEach(t => {
     const v = t.dataset.go;
     t.classList.toggle('active', v === ui.view || (v === 'home' && ['home', 'book', 'unit'].includes(ui.view)));
@@ -165,10 +230,36 @@ function render() {
 const crumb = parts => `<nav class="crumb">${parts.map((p, i) =>
   (i ? ic('chevR') : '') + (p.go ? `<a ${p.go}>${esc(p.t)}</a>` : `<span>${esc(p.t)}</span>`)).join('')}</nav>`;
 
+/* ================= login ================= */
+function renderLogin(errMsg = '') {
+  document.body.classList.add('signed-out');
+  $logout.hidden = true;
+  $side.innerHTML = '';
+  $main.innerHTML = `<div class="card login">
+    <span class="tile" style="--c:#3182f6">${ic('lock')}</span>
+    <h1>LUMOS 단어장</h1>
+    <button class="btn primary xl" id="signIn">관리자 로그인</button>
+    ${errMsg ? `<div class="err">${esc(errMsg)}</div>` : ''}
+  </div>`;
+  $main.querySelector('#signIn').onclick = async e => {
+    e.target.disabled = true;
+    try { await naru.auth.signIn({ collections: COLLECTIONS }); }
+    catch (err) { console.error(err); renderLogin(err.message || '로그인하지 못했어요'); }
+  };
+}
+$logout.onclick = async () => {
+  const ok = await modal({ title: '로그아웃할까요?', ok: '로그아웃' });
+  if (!ok) return;
+  if (pendingFlush) pendingFlush();
+  try { await admin.signOut(); } catch (e) { /* ignore */ }
+  admin = null; db = { books: [] };
+  renderLogin();
+};
+
 /* ================= sidebar ================= */
 function renderSidebar() {
   let h = `<div class="side-head"><h3>교재</h3><button class="btn icon" id="addBook" title="교재 추가" aria-label="교재 추가">${ic('plus')}</button></div>`;
-  if (!db.books.length) h += `<div class="empty-side">교재가 아직 없어요.<br>오른쪽 위 + 버튼으로 시작해 보세요.</div>`;
+  if (!db.books.length) h += `<div class="empty-side">교재가 아직 없어요.</div>`;
   for (const b of db.books) {
     const open = ui.open[b.id];
     const act = ui.bookId === b.id && ui.view === 'book';
@@ -206,34 +297,73 @@ function renderSidebar() {
 async function addBook() {
   const name = await modal({ title: '새 교재 만들기', desc: '교재 이름을 입력해 주세요.', input: { placeholder: '예) 능률 VOCA 고교필수' }, ok: '만들기' });
   if (!name) return;
-  const b = { id: uid(), name, units: [] };
-  db.books.push(b); save();
+  const b = { id: uid(), name, order: Date.now(), units: [] };
+  if (!(await saveBook(b))) return;
+  db.books.push(b);
   go('book', { bookId: b.id, unitId: null });
 }
 async function addUnit(bookId) {
   const b = book(bookId);
   const name = await modal({ title: '새 단원 추가', desc: `<b>${esc(b.name)}</b>에 단원을 추가해요.`, input: { value: `Day ${String(b.units.length + 1).padStart(2, '0')}`, placeholder: '예) Day 01, Unit 3' }, ok: '추가' });
   if (!name) return;
-  const u = { id: uid(), name, raw: '', questions: [], updatedAt: Date.now() };
-  b.units.push(u); save();
+  const u = { id: uid(), name, order: Date.now(), raw: '', questions: [], updatedAt: Date.now() };
+  if (!(await saveUnit(b, u))) return;
+  b.units.push(u);
   go('unit', { bookId, unitId: u.id });
 }
 
 /* ================= home ================= */
+function localBooks() {
+  try {
+    if (localStorage.getItem(MIGRATED_KEY)) return [];
+    const d = JSON.parse(localStorage.getItem(LOCAL_KEY));
+    return d && Array.isArray(d.books) ? d.books.filter(b => b.units && b.units.length) : [];
+  } catch (e) { return []; }
+}
+
+function migrateNotice() {
+  const lb = localBooks();
+  if (!lb.length) return '';
+  return `<div class="notice blue">${ic('cloud')}<span>이 컴퓨터에만 저장된 교재 ${lb.length}권이 있어요. 온라인 단어장으로 옮길까요?</span>
+    <span class="actions"><button class="btn sm ghost" id="mgSkip">안 할래요</button><button class="btn sm primary" id="mgGo">옮기기</button></span></div>`;
+}
+function bindMigrate() {
+  const go1 = $main.querySelector('#mgGo');
+  if (!go1) return;
+  $main.querySelector('#mgSkip').onclick = () => { try { localStorage.setItem(MIGRATED_KEY, 'skip'); } catch (e) { /* */ } render(); };
+  go1.onclick = async () => {
+    go1.disabled = true;
+    const lb = localBooks().map((b, i) => ({
+      id: b.id, name: b.name, order: Date.now() + i,
+      units: b.units.map((u, j) => ({ ...u, order: j, questions: parse(u.raw || '') })),
+    }));
+    toast('온라인으로 옮기는 중', true);
+    const ok = await persist(() => batchAll(writesFor(lb)));
+    if (!ok) { go1.disabled = false; return; }
+    try { localStorage.setItem(MIGRATED_KEY, 'done'); } catch (e) { /* */ }
+    for (const b of lb) {
+      const ex = book(b.id);
+      if (ex) Object.assign(ex, b); else db.books.push(b);
+    }
+    db.books.sort(byOrder);
+    toast(`교재 ${lb.length}권을 옮겼어요`);
+    render();
+  };
+}
+
 function renderHome() {
   if (!db.books.length) {
-    $main.innerHTML = `<div class="welcome">
+    $main.innerHTML = `${migrateNotice()}<div class="welcome">
       <span class="tile" style="--c:#3182f6">${ic('book')}</span>
-      <h1>LUMOS 단어장을 시작해 볼까요?</h1>
-      <p>단어를 입력하면 표로 정리되고,<br>클릭 몇 번으로 A4 단어시험지를 만들 수 있어요.</p>
-      <div class="steps"><span><b>1</b>교재 만들기</span><span><b>2</b>단원별 단어 입력</span><span><b>3</b>시험지 PDF</span></div>
       <button class="btn primary xl" id="w-add" style="max-width:320px">첫 교재 만들기</button></div>`;
     $main.querySelector('#w-add').onclick = addBook;
+    bindMigrate();
     return;
   }
   const nu = db.books.reduce((s, b) => s + b.units.length, 0);
   const nw = db.books.reduce((s, b) => s + bookWords(b), 0);
-  let h = `<div class="hero"><h1>단어장</h1><p>교재를 골라 단원별 단어를 관리하세요.</p></div>
+  let h = `<div class="hero"><h1>단어장</h1></div>
+    ${migrateNotice()}
     <div class="stats">
       <div class="stat"><div class="k">교재</div><div class="v">${nb(db.books.length)}<small>권</small></div></div>
       <div class="stat"><div class="k">단원</div><div class="v">${nb(nu)}<small>개</small></div></div>
@@ -258,8 +388,8 @@ function renderHome() {
   $main.querySelector('#h-add').onclick = addBook;
   $main.querySelectorAll('[data-open-book]').forEach(el => el.onclick = () => go('book', { bookId: el.dataset.openBook, unitId: null }));
   $main.querySelectorAll('li[data-u]').forEach(el => el.onclick = () => go('unit', { bookId: el.dataset.b, unitId: el.dataset.u }));
+  bindMigrate();
 }
-const nb = n => n.toLocaleString('ko-KR');
 
 /* ================= book ================= */
 function renderBook() {
@@ -277,7 +407,7 @@ function renderBook() {
       </div>
     </div>`;
   if (!b.units.length) {
-    h += `<div class="list"><div class="empty"><b>단원이 비어 있어요</b>단원을 추가하고 단어를 입력해 보세요.<br><button class="btn primary" id="emptyAdd">${ic('plus')}첫 단원 추가</button></div></div>`;
+    h += `<div class="list"><div class="empty"><b>단원이 비어 있어요</b><button class="btn primary" id="emptyAdd">${ic('plus')}첫 단원 추가</button></div></div>`;
   } else {
     h += `<div class="list">`;
     b.units.forEach((u, i) => {
@@ -299,17 +429,25 @@ function renderBook() {
   $main.querySelector('#bookTest').onclick = () => openTest(b.id, null);
   $main.querySelector('#renameBook').onclick = async () => {
     const n = await modal({ title: '교재 이름 변경', input: { value: b.name }, ok: '변경' });
-    if (n) { b.name = n; save(); render(); }
+    if (!n) return;
+    const old = b.name; b.name = n;
+    if (!(await saveBook(b))) b.name = old;
+    render();
   };
   $main.querySelector('#delBook').onclick = async () => {
     const ok = await modal({ title: `‘${esc(b.name)}’ 교재를 삭제할까요?`, desc: `단원 ${b.units.length}개와 단어가 모두 지워지고, 되돌릴 수 없어요.`, ok: '삭제', danger: true });
-    if (ok) { db.books = db.books.filter(x => x !== b); save(); toast('교재를 삭제했어요'); go('home', { bookId: null }); }
+    if (!ok) return;
+    const done = await persist(() => batchAll([...b.units.map(u => delW('units', u.id)), delW('books', b.id)]), '교재를 삭제했어요');
+    if (done) { db.books = db.books.filter(x => x !== b); go('home', { bookId: null }); }
   };
   $main.querySelectorAll('.list-row').forEach(el => el.onclick = () => go('unit', { unitId: el.dataset.u }));
-  const move = (e, i, d) => {
+  const move = async (e, i, d) => {
     e.stopPropagation();
     const j = i + d; if (j < 0 || j >= b.units.length) return;
-    [b.units[i], b.units[j]] = [b.units[j], b.units[i]]; save(); render();
+    [b.units[i], b.units[j]] = [b.units[j], b.units[i]];
+    b.units.forEach((u, k) => { u.order = k; });
+    render();
+    await persist(() => batchAll(b.units.map(u => setW('units', u.id, unitData(b, u)))));
   };
   $main.querySelectorAll('[data-up]').forEach(el => el.onclick = e => move(e, +el.dataset.up, -1));
   $main.querySelectorAll('[data-down]').forEach(el => el.onclick = e => move(e, +el.dataset.down, 1));
@@ -325,7 +463,7 @@ function renderUnit() {
     <div class="page-head">
       <div class="titles">
         <input type="text" class="unit-title" id="unitName" value="${esc(u.name)}" aria-label="단원 이름">
-        <div class="page-sub" style="padding-left:0"><span class="save-state" id="saveState"><span class="dot"></span><span>자동 저장됨</span></span></div>
+        <div class="page-sub" style="padding-left:0"><span class="save-state" id="saveState"><span class="dot"></span><span>저장됨</span></span></div>
       </div>
       <div class="actions">
         <button class="btn icon" id="delUnit" title="단원 삭제" aria-label="단원 삭제">${ic('trash')}</button>
@@ -353,6 +491,7 @@ function renderUnit() {
   const $raw = $main.querySelector('#raw');
   const $state = $main.querySelector('#saveState');
   let timer = null;
+  const setState = (txt, saving) => { $state.classList.toggle('saving', !!saving); $state.lastChild.textContent = txt; };
 
   const update = () => {
     const qs = parse($raw.value);
@@ -364,42 +503,48 @@ function renderUnit() {
   };
   update();
 
+  const flushUnit = async () => {
+    clearTimeout(timer); timer = null;
+    pendingFlush = null;
+    if (u.raw === $raw.value) return true;
+    u.raw = $raw.value; u.questions = parse(u.raw); u.updatedAt = Date.now();
+    const ok = await saveUnit(b, u);
+    if ($state.isConnected) setState(ok ? '저장됨' : '저장 실패 · 다시 입력하면 재시도해요', !ok);
+    return ok;
+  };
   const onInput = () => {
-    const qs = update();
-    $state.classList.add('saving'); $state.lastChild.textContent = '저장 중…';
+    update();
+    setState('저장 중…', true);
     clearTimeout(timer);
-    timer = setTimeout(() => {
-      u.raw = $raw.value; u.questions = qs; u.updatedAt = Date.now();
-      if (save()) { $state.classList.remove('saving'); $state.lastChild.textContent = '자동 저장됨'; }
-      renderSidebar();
-    }, 400);
+    pendingFlush = flushUnit;
+    timer = setTimeout(async () => { await flushUnit(); renderSidebar(); }, 800);
   };
   $raw.addEventListener('input', onInput);
   const sample = $main.querySelector('#useSample');
   if (sample) sample.onclick = () => { $raw.value = SAMPLE; sample.remove(); onInput(); $raw.focus(); };
 
-  $main.querySelector('#unitName').addEventListener('change', e => {
+  $main.querySelector('#unitName').addEventListener('change', async e => {
     const n = e.target.value.trim(); if (!n) { e.target.value = u.name; return; }
-    u.name = n; save(); renderSidebar();
+    u.name = n; renderSidebar();
+    await saveUnit(b, u);
   });
   $main.querySelector('#unitName').addEventListener('keydown', e => { if (e.key === 'Enter') e.target.blur(); });
   $main.querySelector('#toBook').onclick = () => go('book', { unitId: null });
   $main.querySelector('#delUnit').onclick = async () => {
     const ok = await modal({ title: `‘${esc(u.name)}’ 단원을 삭제할까요?`, desc: `단어 ${wordCount(u)}개가 지워지고, 되돌릴 수 없어요.`, ok: '삭제', danger: true });
-    if (ok) { clearTimeout(timer); b.units = b.units.filter(x => x !== u); save(); toast('단원을 삭제했어요'); go('book', { unitId: null }); }
+    if (!ok) return;
+    clearTimeout(timer); pendingFlush = null;
+    if (await persist(() => admin.collection('units').delete(u.id), '단원을 삭제했어요')) {
+      b.units = b.units.filter(x => x !== u); go('book', { unitId: null });
+    }
   };
-  $main.querySelector('#unitTest').onclick = () => { flushUnit(); openTest(b.id, [u.id]); };
-  $main.querySelector('#listPdf').onclick = () => {
-    flushUnit();
+  $main.querySelector('#unitTest').onclick = async () => { await flushUnit(); openTest(b.id, [u.id]); };
+  $main.querySelector('#listPdf').onclick = async () => {
+    await flushUnit();
     if (!u.questions.length) return toast('단어를 먼저 입력해 주세요');
     const rows = buildRows([u], 'list', false);
     exportPDF(sheetHTML({ kind: 'list', title: `${u.name} 단어장`, sub: b.name, rows }), `${b.name}_${u.name}_단어장`);
   };
-
-  function flushUnit() {
-    clearTimeout(timer);
-    u.raw = $raw.value; u.questions = parse($raw.value); u.updatedAt = Date.now(); save();
-  }
 }
 
 function wordTableHTML(qs) {
@@ -430,8 +575,8 @@ function openTest(bookId, unitIds) {
 function renderTest() {
   const t = ui.test;
   if (!db.books.length) {
-    $main.innerHTML = `<div class="hero"><h1>시험지 만들기</h1><p>단어장을 골라 A4 단어시험지를 만들어요.</p></div>
-      <div class="list"><div class="empty"><b>먼저 단어장이 필요해요</b>교재를 만들고 단어를 입력해 주세요.<br><button class="btn primary" id="tGoAdd">${ic('plus')}교재 만들기</button></div></div>`;
+    $main.innerHTML = `<div class="hero"><h1>시험지 만들기</h1></div>
+      <div class="list"><div class="empty"><b>먼저 단어장이 필요해요</b><button class="btn primary" id="tGoAdd">${ic('plus')}교재 만들기</button></div></div>`;
     $main.querySelector('#tGoAdd').onclick = addBook;
     return;
   }
@@ -451,7 +596,7 @@ function renderTest() {
   const demo = cells => cells.map(c => `<i class="${c ? '' : 'b'}">${c || '·'}</i>`).join('');
 
   $main.innerHTML = `
-    <div class="hero"><h1>시험지 만들기</h1><p>단원과 출제 방식을 고르면 A4 시험지가 완성돼요.</p></div>
+    <div class="hero"><h1>시험지 만들기</h1></div>
     <div class="card">
       <div class="step">
         <div class="step-head"><span class="num">1</span><h3>교재</h3></div>
@@ -632,8 +777,8 @@ async function exportPDF(html, filename) {
 function renderBackup() {
   const nu = db.books.reduce((s, b) => s + b.units.length, 0);
   $main.innerHTML = `
-    <div class="hero"><h1>백업</h1><p>단어장을 파일로 보관하거나 다른 컴퓨터로 옮겨요.</p></div>
-    <div class="notice">${ic('info')}<span>단어장은 지금 쓰는 브라우저에만 저장돼요. 브라우저 기록을 지우거나 다른 컴퓨터를 쓸 때를 대비해 백업 파일을 받아 두세요.</span></div>
+    <div class="hero"><h1>백업</h1></div>
+    <div class="notice">${ic('info')}<span>단어장은 온라인에 저장돼서 어느 컴퓨터에서든 로그인하면 같은 내용이 보여요. 만약을 위해 가끔 백업 파일을 받아 두세요.</span></div>
     <div class="backup-grid">
       <div class="card">
         <span class="tile md" style="--c:#3182f6">${ic('download')}</span>
@@ -644,13 +789,14 @@ function renderBackup() {
       <div class="card">
         <span class="tile md" style="--c:#00b493">${ic('upload')}</span>
         <div class="card-title" style="margin-bottom:6px">백업 파일 불러오기</div>
-        <p>불러오면 지금 저장된 단어장이 백업 파일 내용으로 바뀌어요.</p>
+        <p>불러오면 온라인 단어장 전체가 백업 파일 내용으로 바뀌어요. 다른 선생님 화면에도 똑같이 적용돼요.</p>
         <button class="btn" id="bkPick">파일 선택</button>
         <input type="file" id="bkFile" accept="application/json,.json" hidden>
       </div>
     </div>`;
   $main.querySelector('#bkDown').onclick = () => {
-    const blob = new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' });
+    const out = { books: db.books.map(b => ({ id: b.id, name: b.name, order: b.order, units: b.units.map(u => ({ id: u.id, name: u.name, order: u.order, raw: u.raw, updatedAt: u.updatedAt })) })) };
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `lumos-단어장-백업-${new Date().toISOString().slice(0, 10)}.json`;
@@ -664,9 +810,23 @@ function renderBackup() {
     try {
       const d = JSON.parse(await f.text());
       if (!d || !Array.isArray(d.books)) throw new Error('형식 오류');
-      const ok = await modal({ title: '백업 파일을 불러올까요?', desc: `교재 ${d.books.length}권을 불러와요. 지금 저장된 단어장은 이 내용으로 바뀌어요.`, ok: '불러오기' });
+      const ok = await modal({ title: '백업 파일을 불러올까요?', desc: `교재 ${d.books.length}권을 불러와요. 지금 온라인 단어장은 이 내용으로 바뀌어요.`, ok: '불러오기', danger: true });
       if (!ok) return;
-      db = d; save(); toast('불러오기를 마쳤어요'); go('home', { bookId: null, unitId: null });
+      const next = d.books.map((b, i) => ({
+        id: b.id || uid(), name: b.name || '이름 없는 교재', order: b.order ?? i,
+        units: (b.units || []).map((u, j) => ({ id: u.id || uid(), name: u.name || `Unit ${j + 1}`, order: u.order ?? j, raw: u.raw || '', updatedAt: u.updatedAt || Date.now(), questions: parse(u.raw || '') })),
+      }));
+      const keepBooks = new Set(next.map(b => b.id));
+      const keepUnits = new Set(next.flatMap(b => b.units.map(u => u.id)));
+      const deletes = [
+        ...db.books.flatMap(b => b.units).filter(u => !keepUnits.has(u.id)).map(u => delW('units', u.id)),
+        ...db.books.filter(b => !keepBooks.has(b.id)).map(b => delW('books', b.id)),
+      ];
+      toast('불러오는 중', true);
+      if (await persist(() => batchAll([...writesFor(next), ...deletes]), '불러오기를 마쳤어요')) {
+        db = { books: next.sort(byOrder) };
+        go('home', { bookId: null, unitId: null });
+      }
     } catch (err) { toast('올바른 백업 파일이 아니에요'); }
     finally { $file.value = ''; }
   };
@@ -682,4 +842,32 @@ function toast(msg, loading = false) {
   if (!loading) toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
 }
 
-render();
+/* ================= sync ================= */
+// 다른 선생님이 고친 내용을 탭으로 돌아올 때 다시 불러오기 (단원 편집 중에는 건너뜀)
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || !admin || pendingFlush || ui.view === 'unit' || $modal.innerHTML) return;
+  try { await loadAll(); render(); } catch (e) { /* 다음 기회에 */ }
+});
+window.addEventListener('beforeunload', e => { if (pendingFlush) { pendingFlush(); e.preventDefault(); } });
+
+/* ================= boot ================= */
+async function boot() {
+  $main.innerHTML = `<div class="loading"><span class="spin"></span></div>`;
+  try {
+    admin = await naru.auth.session();
+  } catch (e) {
+    console.error(e);
+    admin = null;
+  }
+  if (!admin) return renderLogin();
+  try {
+    await loadAll();
+  } catch (e) {
+    console.error(e);
+    if (e && (e.code === 'AUTH_REQUIRED' || e.code === 'ACCESS_DENIED')) { admin = null; return renderLogin(e.message); }
+    $main.innerHTML = `<div class="card login"><h1>단어장을 불러오지 못했어요</h1><p class="muted">${esc(e.message || '')}</p><button class="btn primary" onclick="location.reload()">다시 시도</button></div>`;
+    return;
+  }
+  render();
+}
+boot();

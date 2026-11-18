@@ -36,6 +36,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; }
 body {
   font-family: var(--font);
@@ -65,8 +66,22 @@ svg.i.sm { width: 16px; height: 16px; }
 }
 .topbar-inner {
   height: 60px; padding: 0 24px;
-  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  display: flex; align-items: center; gap: 12px;
 }
+.topbar-inner .tabs { margin-left: auto; }
+
+/* login */
+.login { max-width: 420px; margin: 72px auto; text-align: center; padding: 40px 28px 28px; }
+.login .tile { margin: 0 auto 20px; width: 64px; height: 64px; border-radius: 20px; }
+.login .tile svg { width: 30px; height: 30px; }
+.login h1 { font-size: 24px; font-weight: 800; letter-spacing: -0.03em; margin: 0 0 24px; }
+.login .err { color: var(--danger); font-size: 14px; margin-top: 14px; }
+.loading { display: grid; place-items: center; min-height: 50vh; }
+.loading .spin { width: 28px; height: 28px; border: 3px solid var(--line); border-top-color: var(--primary); border-radius: 50%; animation: spin .7s linear infinite; }
+body.signed-out .layout { grid-template-columns: 1fr; }
+body.signed-out aside#sidebar, body.signed-out .tabs { display: none; }
+.notice.blue { background: var(--primary-weak); color: var(--primary-text); align-items: center; }
+.notice .actions { margin-left: auto; }
 .brand { display: flex; align-items: center; gap: 10px; cursor: pointer; text-decoration: none; color: inherit; }
 .brand-mark {
   width: 30px; height: 30px; border-radius: 9px;
